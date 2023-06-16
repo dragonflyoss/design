@@ -1,6 +1,4 @@
 # Triton Server
-
-# Triton Server 架构概述
 ## 一个简单的 Use Case
 
 - 创建一个 Model Repo 。
