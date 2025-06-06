@@ -187,10 +187,9 @@ Add TCP protocol configuration to `dfdaemon.yaml`:
 ```yaml
 storage:
   server:
-    protocol: tcp
     tcp:
-      port: 65003
-      buffer_size: 65536
+      port: 4005
+      buffer_size: 4194304
       idle_timeout: 300s
       max_connections: 1000
 ```
