@@ -194,28 +194,6 @@ storage:
       max_connections: 1000
 ```
 
-## Implementation Plan
-
-### Phase 1: Core Infrastructure (Weeks 1-3)
-- Design and implement core traits (Client, Server)
-- Set up project structure and module organization
-- Implement Vortex protocol codec
-
-### Phase 2: TCP Implementation (Weeks 4-7)
-- Implement TCPServer with connection handling
-- Implement TCPClient with connection pooling
-- Add business logic for piece download operations
-
-### Phase 3: Integration & Optimization (Weeks 8-11)
-- Integrate TCPDownloader with existing system
-- Performance benchmarking and tuning
-- Comprehensive testing and bug fixes
-
-### Phase 4: Documentation (Week 12)
-- User guides and configuration documentation
-- API documentation and code comments
-- Performance tuning guidelines
-
 ## Testing Strategy
 
 1. **Unit Tests**: Individual component testing with 85%+ coverage
