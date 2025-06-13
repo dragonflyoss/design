@@ -155,23 +155,45 @@ impl Downloader for TCPDownloader {
 ### 4. Performance Optimizations
 
 #### Zero-Copy Implementation
-Using `ReaderStream` for efficient data transfer:
+Using `sendfile` for efficient data transfer:
 
 ```rust
-async fn piece_streaming(stream: &TcpStream, piece_id: u32) -> Result<()> {
-    // Create ReaderStream with 8KB buffer
-    let mut reader_stream = ReaderStream::with_capacity(buf_reader, 8192);
-    let mut write_stream = stream.try_clone()?;
-    
-    // Stream data directly from storage to network
-    while let Some(chunk_result) = reader_stream.next().await {
-        match chunk_result {
-            Ok(chunk) => write_stream.write_all(&chunk).await?,
-            Err(e) => return Err(e),
-        }
+/// read_piece reads the piece from the content.
+    #[instrument(skip_all)]
+    pub async fn read_piece(
+        &self,
+        socket_fd: c_int,
+        task_id: &str,
+        offset: u64,
+        length: u64,
+        range: Option<Range>,
+    ) {
+        let task_path = self.get_task_path(task_id);
+
+        // Calculate the target offset and length based on the range.
+        let (target_offset, target_length) = calculate_piece_range(offset, length, range);
+
+        let f = File::open(task_path.as_path()).await.inspect_err(|err| {
+            error!("open {:?} failed: {}", task_path, err);
+        })?;
+        
+        // Original Implementation
+        // let mut f_reader = BufReader::with_capacity(self.config.storage.read_buffer_size, f); 
+        // f_reader
+        //     .seek(SeekFrom::Start(target_offset))
+        //     .await
+        //     .inspect_err(|err| {
+        //         error!("seek {:?} failed: {}", task_path, err);
+        //     })?;
+        // Ok(f_reader.take(target_length))
+        
+        //Sendfile Implementation
+        task::spawn_blocking(move || {
+            unsafe {
+                libc::sendfile(socket_fd, f, target_offset, target_length)
+            }
+        }).await?;
     }
-    Ok(())
-}
 ```
 
 #### TCP Tuning Parameters
