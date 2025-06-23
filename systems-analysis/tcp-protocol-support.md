@@ -11,7 +11,7 @@ This design document proposes adding TCP protocol support to Dragonfly's P2P fil
 - **Compatibility**: TCP support enables better compatibility with diverse network environments
 - **Optimization**: Opportunity for protocol-specific optimizations for large files/AI models
 
-## Design Goals
+## Goals
 
 1. Add TCP protocol support while maintaining backward compatibility with existing gRPC implementation
 2. Preserve the existing `Downloader` interface for seamless integration
@@ -20,12 +20,6 @@ This design document proposes adding TCP protocol support to Dragonfly's P2P fil
 
 ## Architecture
 
-### Current Architecture
-```
-DownloaderFactory -> Downloader (Interface) -> GRPCDownloader
-```
-
-### Proposed Architecture
 ```
 DownloaderFactory -> Downloader (Interface) -> {
     GRPCDownloader,
@@ -33,9 +27,8 @@ DownloaderFactory -> Downloader (Interface) -> {
 }
 ```
 
-### Module Structure
+### Modules
 
-#### New Modules
 ```
 dragonfly-client-storage/src/
 ├── client/
@@ -46,34 +39,32 @@ dragonfly-client-storage/src/
     └── tcp.rs          # TCPServer implementation
 ```
 
-#### Modified Modules
 - `piece_downloader.rs`: Add TCP support to DownloaderFactory
 - `dfdaemon/main.rs`: Add protocol configuration parsing
 - Configuration file: Add `storage.server.protocol` option
 
-## Technical Implementation
+## Implementation
 
-### 1. Core Interfaces
+### Client
 
-#### Client Trait
 ```rust
 #[async_trait]
 pub trait Client: Send + Sync {
     type Config;
     type Error;
-    
+
     async fn new(
         config: Self::Config,
         addr: String,
         is_download_piece: bool
     ) -> Result<Self, Self::Error> where Self: Sized;
-    
+
     async fn download_piece(
         &self,
         request: DownloadPieceRequest,
         timeout: Duration,
     ) -> Result<DownloadPieceResponse, Self::Error>;
-    
+
     async fn download_persistent_cache_piece(
         &self,
         request: DownloadPersistentCachePieceRequest,
@@ -82,11 +73,12 @@ pub trait Client: Send + Sync {
 }
 ```
 
-### 2. Vortex Protocol Adaptation
+### Vortex Protocol
 
 The TCP implementation will support Dragonfly's Vortex application-layer protocol:
 
 #### Message Format
+
 ```
 +--------+--------+--------+--------+
 | ID     | Tag    | Length | Value  |
@@ -95,6 +87,7 @@ The TCP implementation will support Dragonfly's Vortex application-layer protoco
 ```
 
 #### Message Types
+
 - **Download Piece (Tag=0x00)**: Request piece content from peer
 - **Piece Content (Tag=0x01)**: Raw piece data or fragment
 - **Error (Tag=0xFF)**: Data transmission error
@@ -102,6 +95,7 @@ The TCP implementation will support Dragonfly's Vortex application-layer protoco
 - **Reserved Tags (2-253)**: Future protocol extensions
 
 #### Encoding/Decoding Implementation
+
 ```rust
 impl Vortex {
     pub fn from_bytes(bytes: Bytes) -> Result<Self> {
@@ -118,7 +112,7 @@ impl Vortex {
 }
 ```
 
-### 3. TCP Downloader Implementation
+### TCP Downloader
 
 ```rust
 pub struct TCPDownloader {
@@ -152,9 +146,10 @@ impl Downloader for TCPDownloader {
 }
 ```
 
-### 4. Performance Optimizations
+### Performance
 
-#### Zero-Copy Implementation
+#### Zero-Copy
+
 Using `sendfile` for efficient data transfer:
 
 ```rust
@@ -176,9 +171,9 @@ Using `sendfile` for efficient data transfer:
         let f = File::open(task_path.as_path()).await.inspect_err(|err| {
             error!("open {:?} failed: {}", task_path, err);
         })?;
-        
+
         // Original Implementation
-        // let mut f_reader = BufReader::with_capacity(self.config.storage.read_buffer_size, f); 
+        // let mut f_reader = BufReader::with_capacity(self.config.storage.read_buffer_size, f);
         // f_reader
         //     .seek(SeekFrom::Start(target_offset))
         //     .await
@@ -186,7 +181,7 @@ Using `sendfile` for efficient data transfer:
         //         error!("seek {:?} failed: {}", task_path, err);
         //     })?;
         // Ok(f_reader.take(target_length))
-        
+
         //Sendfile Implementation
         task::spawn_blocking(move || {
             unsafe {
@@ -196,13 +191,14 @@ Using `sendfile` for efficient data transfer:
     }
 ```
 
-#### TCP Tuning Parameters
+#### TCP Parameters
+
 - **Buffer Sizes**: Optimize SO_RCVBUF and SO_SNDBUF
 - **TCP Options**: TCP_NODELAY, TCP_CORK, TCP_KEEPALIVE
 - **Congestion Control**: BBR algorithm for high-bandwidth networks
 - **Connection Management**: Connection pooling with idle timeout
 
-### 5. Configuration
+### Configuration
 
 Add TCP protocol configuration to `dfdaemon.yaml`:
 
@@ -216,18 +212,12 @@ storage:
       max_connections: 1000
 ```
 
-## Testing Strategy
+## Testing
 
 1. **Unit Tests**: Individual component testing with 85%+ coverage
 2. **Integration Tests**: End-to-end functionality verification
 3. **Performance Tests**: TCP vs gRPC benchmarking
 4. **Stress Tests**: High concurrency and long-duration testing
-
-## Expected Outcomes
-
-1. **Functionality**: Complete TCP-based P2P file transfer capability
-2. **Performance**: 10-20% performance improvement in specific scenarios
-4. **Documentation**: Comprehensive user and developer documentation
 
 ## Compatibility
 
@@ -235,7 +225,7 @@ storage:
 - **Configuration**: New TCP options with sensible defaults
 - **Migration**: Users can switch protocols via configuration without code changes
 
-## Future Considerations
+## Future
 
 - **Protocol Negotiation**: Automatic protocol selection based on network conditions
 - **Hybrid Mode**: Simultaneous multi-protocol support for optimal performance
