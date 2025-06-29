@@ -1,52 +1,305 @@
+# Mutating Admission Webhook for Automatic P2P Injection in Dragonfly
+
 ## Overview
 
-This project introduces a Kubernetes Mutating Admission Webhook to Dragonfly's Helm Chart to automate P2P client injection. The Webhook dynamically injects Dragonfly configurations (e.g., proxy variables, volume mounts, dfget tools) into Pods based on annotations/labels. This eliminates manual YAML modifications, simplifying user adoption in Kubernetes environments.
+This document proposes the design of a Kubernetes Mutating Admission Webhook integrated into the official Dragonfly Helm Chart. The primary function of this webhook is to automate the injection of P2P capabilities into user Pods. It intercepts Pod creation requests and, based on specific annotations, automatically modifies the Pod's YAML definition to include necessary configurations like volumes, volume mounts, and environment variables. This approach will reduce the need for manual modifications to application manifests, significantly simplifying the use of Dragonfly in a Kubernetes environment.
 
-## Technical Implementation
+## Motivation
 
-### Core Webhook Logic
+- **Simplification**: Manually configuring Pods to use Dragonfly's P2P client (`dfget`) is complex, requiring specific knowledge of volumes, mounts, and container commands.
 
-The Mutating Webhook is registered via MutatingWebhookConfiguration to intercept Pod creations. Key injection features:
+- **Error Reduction**: Automated injection prevents common manual configuration errors, improving reliability.
 
-1. P2P Proxy Injection
+- **User Experience**: Lowers the barrier to entry for developers, making the integration of Dragonfly's P2P capabilities seamless and non-intrusive.
 
-   - Injects `DRAGONFLY_INJECT_PROXY` env-var into containers, dynamically constructing its value (e.g., `http://$(NODE_NAME):8001`).
-   - Uses Downward API to fetch spec.nodeName/status.hostIP and Helm Chart values for the proxy port.
+- **Consistency**: Ensures that all designated Pods receive a standardized and correct P2P configuration.
 
-   2. dfdaemon Socket Mount
-      Automatically adds a hostPath volume to expose the host's dfdaemon socket (default is `/var/run/dfdaemon.sock`) and mounts it to target containers.
+## Goals
 
-2. dfget Tool Injection via InitContainer
+1. Develop a core Mutating Admission Webhook service to automate the injection of P2P proxy settings, `dfdaemon` socket mounts, and binaries such as `dfget`.
 
-   - Injects a multi-architecture initContainer to copy dfget into a shared emptyDir volume.
-   - Updates the application container’s PATH to include the shared volume path. Uses Docker Manifest for auto-arch selection.
+2. Provide CI support, including `Dockerfiles` for building both the webhook service container image and its associated initContainer image.
 
-3. Helm Chart Deployment
-   - Extends Dragonfly's Helm Chart with templates for:
-   - Webhook Deployment/Service
-   - RBAC (ClusterRole/RoleBinding)
-   - MutatingWebhookConfiguration
-   - Configuration via Helm Values (enable/disable, socket path, proxy port).
+3. Integrate the webhook deployment (Deployment, Service, RBAC, MutatingWebhookConfiguration) into the official Dragonfly Helm Chart.
 
-### Testing & Observability
+4. Implement comprehensive unit and E2E tests for the core injection logic.
 
-- Unit Tests: Validate mutation logic for env-vars, volume mounts, and initContainers.
-- E2E Tests: Verify end-to-end injection in Kind clusters.
-- Logging: Structured logs for auditability and error tracing.
+5. Produce clear user documentation detailing how to enable and configure the webhook.
 
-This approach standardizes P2P integration while maintaining compatibility across architectures and Kubernetes distributions.
-
-## Workflow
+## Architecture
 
 ```mermaid
 graph LR
-A[Pod Creation] --> B{Has 'dragonfly.io/inject-p2p' annotation?}
-B -- Yes --> C[Mutating Webhook Interception]
-C --> D[Inject Proxy Environment Variables]
-C --> E[Mount Socket Volume]
-C --> F[Add dfget InitContainer]
-B -- No --> G[Standard Creation]
-D --> H[Pod Creation]
-E --> H[Pod Creation]
-F --> H[Pod Creation]
+    B(Server starts)
+    B --> C(Webhook request listening)
+    C --> D{Whether there is a specific annotation}
+    D -->|Yes| E(InjectorManager)
+    D -->|No| F(Do not process)
+    E --> E1(P2P proxy environment variable injection)
+    E --> E2(dfdaemon Socket volume mounting)
+    E --> E3(binary tool injection)
+    E1 --> H(Patch Generator)
+    E2 --> H
+    E3 --> H
+    H --> K(Modify Pod definition)
 ```
+
+## Modules
+
+```bash
+dragonfly-inject-p2p/
+├── cmd/
+│   └── main.go             # Entry point
+├── deploy/
+├── internal/
+│   ├── config/
+│   │   └── config.go       # Configuration management
+│   ├── server/
+│   │   └── server.go       # HTTP server
+│   ├── handler/
+│   │   └── handler.go      # Webhook request handling
+│   ├── injector/
+│   │   ├── manager/
+│   │   │   └── manager.go  # Injection manager
+│   │   ├── resource/
+│   │   │   ├── proxy_injector.go   # P2P proxy injector
+│   │   │   ├── socket_injector.go  # dfdaemon Socket volume mount injector
+│   │   │   └── binary_injector.go  # binary tool injector
+│   │   └── patch/
+│   │       └── patch.go            # JSON Patch
+│   └── util/
+│       └── util.go         # Utility functions
+├── scripts/                # Helper scripts
+└── test/                   # Test code
+    ├── unit/
+    └── e2e/
+```
+
+## Implementation
+
+### Config
+
+```go
+type Config struct {
+    /* Some webhook server config*/
+
+    //...
+
+    /* Webhook Config*/
+    // Proxy port for constructing P2P proxy environment variables
+    ProxyPort string
+    // Path to the dfdaemon socket file on the node for volume mounting
+    DfdaemonSocketPath string
+    // Version of the init container image containing the binary tool
+    InitConatinerVersion string
+    // Name of the shared volume for binary tool injection
+    SharedVolumeName string
+    // Mount path of the shared volume inside containers for binary access
+    SharedVolumeMountPath string
+    // Path to the binary tool within the init container
+    InitContainerPath string
+    // Annotation name to trigger the Webhook injection
+    AnnotationName string
+}
+```
+
+### Server
+
+```go
+type Server struct {
+    /* Server config suach as IP and port*/
+
+    //...
+
+    handler Handler
+}
+
+func (s *Server) Start() {
+    http.HandleFunc("/mutate", s.handler.HandleWebhook)
+}
+```
+
+### Handler
+
+```go
+type Handler struct {
+    injectorManager InjectorManager
+}
+
+func (h *Handler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
+    // parse pod from request
+    // ...
+    if /* pod has specific annotation*/ {
+        mutatedPod := h.injectorManager.Inject(pod)
+        patch := patch.GeneratePatch(pod, mutatedPod)
+        /* send patch pod */
+    } else {
+        /* send Original pod */
+    }
+}
+```
+
+### InjectorManager
+
+```go
+type Injector interface {
+    Inject(pod *corev1.Pod) *corev1.Pod
+}
+```
+
+```go
+type InjectorManager struct {
+    config Config
+    injectors []Injector
+}
+
+func (im *InjectorManager) Inject(pod *corev1.Pod) *corev1.Pod {
+    for _, injector := range im.injectors {
+        pod = injector.Inject(pod)
+    }
+    return pod
+}
+```
+
+### Injector
+
+```go
+type ProxyInjector struct {
+    // proxyInjector config
+    // such as proxy env ...
+}
+
+func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
+    // inject proxy env
+    // ...
+    return mutatedPod
+}
+
+// SocketInjector
+// ...
+
+// BinaryInjector
+// ...
+```
+
+## Webhook Details
+
+1. **P2P Proxy Environment Variable Injection**:
+   To enable application traffic within the Pod to pass through the Dragonfly P2P network proxy, the Webhook will inject environment variables such as `DRAGONFLY_INJECT_PROXY` into the application container of the target Pod. The proxy address will be dynamically constructed, where the node name or IP can be obtained via the Downward API (`spec.nodeName` or `status.hostIP`), and the proxy port is retrieved from the Webhook configuration or Helm Chart, forming a proxy address in the form of `http://$(NODE_NAME_OR_IP):$(DRAGONFLY_PROXY_PORT)`. A sample yaml is as follows:
+
+   ```yaml
+   apiVersion: v1
+   kind: Pod
+   metadata:
+     name: test-pod
+     annotations:
+       dragonfly.io/inject-p2p: "true" # webhook listens for this annotation
+   spec:
+     containers:
+       - name: test-pod-cotainer
+         image: test-pod-image:latest
+         env:
+           - name: NODE_NAME # Obtain the scheduled node name via Downward API
+             valueFrom:
+               fieldRef:
+                 fieldPath: spec.nodeName
+           - name: DRAGONFLY_PROXY_PORT # Port value obtained from Helm Chart
+             value: "8001" # Assume the Helm Chart sets the port to 8001
+           - name: DRAGONFLY_INJECT_PROXY # Concatenated proxy address
+             value: "http://$(NODE_NAME):$(DRAGONFLY_PROXY_PORT)"
+   ```
+
+2. **dfdaemon Socket Volume Mounting**:
+   `dfget` or other clients need to communicate with the dfdaemon daemon on the node via a Unix Domain Socket. The Webhook will automatically add a hostPath Volume to the Pod to expose the Socket file based on the configuration (default is `/var/run/dfdaemon.sock`) and add the corresponding VolumeMount in the target container to ensure the client can access the Socket. A sample yaml is as follows:
+
+   ```yaml
+   apiVersion: v1
+   kind: Pod
+   metadata:
+     name: test-app-with-dfdaemon-socket
+     annotations:
+       dragonfly.io/inject-p2p: "true" # Annotation to trigger the Webhook
+   spec:
+     containers:
+       - name: test-app-container
+         image: test-app-image:latest
+         volumeMounts:
+           - name: dfdaemon-socket
+             mountPath: /var/run/dfdaemon.sock # Path to dfdaemon socket inside the container
+     volumes:
+       - name: dfdaemon-socket
+         hostPath:
+           path: /var/run/dfdaemon.sock # Actual path to dfdaemon socket on the node
+           type: Socket
+   ```
+
+3. **Binary Tool Injection**:
+   Considering that many base container images do not include the binary tool (such as `dfget`), and manual installation is inconvenient, this project will solve this problem using an Init Container. The Webhook will automatically add an initContainer to the target Pod. This initContainer is a custom lightweight image available in both amd64 and arm64 architectures, each containing the corresponding architecture's binary tool. The Webhook will also copy the binary tool from this initContainer to a shared volume. Subsequently, the Webhook modifies the `PATH` environment variable of the application container to add the shared volume directory where binary is located, allowing the application container to execute binary commands directly from the command line without additional user installation or specifying the full path.
+
+   The InitContainer uses Docker's manifest list to achieve the function of automatically importing the corresponding architecture initContainer, and its build commands are as follows:
+
+   ```bash
+   # Create manifest
+   docker manifest create dragonflyoss/d7y-p2p-injector:latest \
+   dragonflyoss/d7y-p2p-injector-amd64-linux:latest \
+   dragonflyoss/d7y-p2p-injector-arm64-linux:latest
+
+   docker manifest annotate dragonflyoss/d7y-p2p-injector-amd64-linux:latest --arch amd64 --os linux
+   docker manifest annotate dragonflyoss/d7y-p2p-injector-arm64-linux:latest --arch arm64 --os linux
+   docker manifest push dragonflyoss/d7y-p2p-injector:latest
+   ```
+
+   Sample yaml for the injected pod:
+
+   ```yaml
+   apiVersion: v1
+   kind: Pod
+   metadata:
+     name: test-app-with-dfget-init-image
+     annotations:
+       dragonfly.io/inject-p2p: "true" # Annotation to trigger the Webhook
+       dragonfly.io/d7y-p2p-injector-version: "2.2.3" # Specify the version of the injector image, default is latest if not specified
+   spec:
+     initContainers: # Injected by the webhook
+       - name: d7y-p2p-injector
+         image: dragonflyoss/d7y-p2p-injector:2.2.3
+         command: ["cp", "/usr/local/bin/dfget", "/dfget-tool/dfget"] # Copy dfget to the shared volume
+         volumeMounts:
+           - name: binary-shared-data
+             mountPath: /binary-tool
+     containers:
+       - name: test-app-container
+         image: test-app-image:latest
+         env:
+           - name: PATH
+             value: "/binary-tool:$(PATH)" # Add to the environment variable
+         volumeMounts:
+           - name: binary-shared-data
+             mountPath: /binary-tool
+     volumes:
+       - name: binary-shared-data
+         emptyDir: {}
+   ```
+
+## Testing
+
+1. **Unit Tests**: Core injection logic, annotation parsing, and patch generation will be covered by unit tests to ensure correctness.
+
+2. **Integration & E2E Testing**: End-to-end test scripts will be developed to verify the complete workflow, from Pod creation with annotations to the successful mutation and deployment of the Pod with all injected configurations.
+3. **Stability Testing**: Evaluate the webhook's resilience and stability under concurrent Pod creation requests to ensure consistent behavior during peak workloads.
+
+## Compatibility
+
+- **Backward Compatibility**: The webhook is disabled by default and only acts on Pods that are explicitly annotated. It will have no impact on existing Dragonfly installations or other workloads.
+
+- **Opt-In Model**: Functionality is strictly opt-in via Pod annotations, giving users full control over which workloads are affected.
+
+- **Configurability**: Key parameters, such as socket paths and proxy ports, will be configurable through the Helm Chart to adapt to different environments.
+
+## Future
+
+- **Extended Binary Injection**: Expand the injection mechanism to include other Dragonfly tools, such as `dfcache`, to provide a richer set of P2P capabilities.
+
+- **Sidecar Container Investigation**: Evaluate using a sidecar container as an alternative to the Init Container for more advanced tool lifecycle management.
+
+- **Granular Annotation Control**: Enhance annotations to allow for more fine-grained control over the injected configurations, such as resource limits or specific command-line flags for the tools.
