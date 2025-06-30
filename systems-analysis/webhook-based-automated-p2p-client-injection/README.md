@@ -37,7 +37,7 @@ graph LR
     D -->|No| F(Do not process)
     E --> E1(P2P proxy environment variable injection)
     E --> E2(dfdaemon Socket volume mounting)
-    E --> E3(binary tool injection)
+    E --> E3(cli tool injection)
     E1 --> H(Patch Generator)
     E2 --> H
     E3 --> H
@@ -64,7 +64,7 @@ dragonfly-inject-p2p/
 │   │   ├── resource/
 │   │   │   ├── proxy_injector.go   # P2P proxy injector
 │   │   │   ├── socket_injector.go  # dfdaemon Socket volume mount injector
-│   │   │   └── binary_injector.go  # binary tool injector
+│   │   │   └── cli_injector.go     # cli tool injector
 │   │   └── patch/
 │   │       └── patch.go            # JSON Patch
 │   └── util/
@@ -90,13 +90,13 @@ type Config struct {
     ProxyPort string
     // Path to the dfdaemon socket file on the node for volume mounting
     DfdaemonSocketPath string
-    // Version of the init container image containing the binary tool
+    // Version of the init container image containing the cli tool
     InitConatinerVersion string
-    // Name of the shared volume for binary tool injection
+    // Name of the shared volume for cli tool injection
     SharedVolumeName string
-    // Mount path of the shared volume inside containers for binary access
+    // Mount path of the shared volume inside containers for cli access
     SharedVolumeMountPath string
-    // Path to the binary tool within the init container
+    // Path to the cli tool within the init container
     InitContainerPath string
     // Annotation name to trigger the Webhook injection
     AnnotationName string
@@ -193,7 +193,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
    metadata:
      name: test-pod
      annotations:
-       dragonfly.io/inject-p2p: "true" # webhook listens for this annotation
+       dragonfly.io/inject: "true" # webhook listens for this annotation
    spec:
      containers:
        - name: test-pod-cotainer
@@ -218,7 +218,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
    metadata:
      name: test-app-with-dfdaemon-socket
      annotations:
-       dragonfly.io/inject-p2p: "true" # Annotation to trigger the Webhook
+       dragonfly.io/inject: "true" # Annotation to trigger the Webhook
    spec:
      containers:
        - name: test-app-container
@@ -233,20 +233,20 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
            type: Socket
    ```
 
-3. **Binary Tool Injection**:
-   Considering that many base container images do not include the binary tool (such as `dfget`), and manual installation is inconvenient, this project will solve this problem using an Init Container. The Webhook will automatically add an initContainer to the target Pod. This initContainer is a custom lightweight image available in both amd64 and arm64 architectures, each containing the corresponding architecture's binary tool. The Webhook will also copy the binary tool from this initContainer to a shared volume. Subsequently, the Webhook modifies the `PATH` environment variable of the application container to add the shared volume directory where binary is located, allowing the application container to execute binary commands directly from the command line without additional user installation or specifying the full path.
+3. **Cli Tool Injection**:
+   Considering that many base container images do not include the cli tool (such as `dfget`), and manual installation is inconvenient, this project will solve this problem using an Init Container. The Webhook will automatically add an initContainer to the target Pod. This initContainer is a custom lightweight image available in both amd64 and arm64 architectures, each containing the corresponding architecture's cli tool. The Webhook will also copy the cli tool from this initContainer to a shared volume. Subsequently, the Webhook modifies the `PATH` environment variable of the application container to add the shared volume directory where cli is located, allowing the application container to execute cli commands directly from the command line without additional user installation or specifying the full path.
 
    The InitContainer uses Docker's manifest list to achieve the function of automatically importing the corresponding architecture initContainer, and its build commands are as follows:
 
    ```bash
    # Create manifest
-   docker manifest create dragonflyoss/d7y-p2p-injector:latest \
-   dragonflyoss/d7y-p2p-injector-amd64-linux:latest \
-   dragonflyoss/d7y-p2p-injector-arm64-linux:latest
+   docker manifest create dragonflyoss/cli-tools:latest \
+   dragonflyoss/cli-tools-amd64-linux:latest \
+   dragonflyoss/cli-tools-arm64-linux:latest
 
-   docker manifest annotate dragonflyoss/d7y-p2p-injector-amd64-linux:latest --arch amd64 --os linux
-   docker manifest annotate dragonflyoss/d7y-p2p-injector-arm64-linux:latest --arch arm64 --os linux
-   docker manifest push dragonflyoss/d7y-p2p-injector:latest
+   docker manifest annotate dragonflyoss/cli-tools-amd64-linux:latest --arch amd64 --os linux
+   docker manifest annotate dragonflyoss/cli-tools-arm64-linux:latest --arch arm64 --os linux
+   docker manifest push dragonflyoss/cli-tools:latest
    ```
 
    Sample yaml for the injected pod:
@@ -255,29 +255,31 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
    apiVersion: v1
    kind: Pod
    metadata:
-     name: test-app-with-dfget-init-image
+     name: test-app-with-cli-tools-image
      annotations:
-       dragonfly.io/inject-p2p: "true" # Annotation to trigger the Webhook
-       dragonfly.io/d7y-p2p-injector-version: "2.2.3" # Specify the version of the injector image, default is latest if not specified
+       dragonfly.io/inject: "true" # Annotation to trigger the Webhook
+       # The image and version fields only need to be added if you want to specify non-default values.
+       # The webhook will inject default values from helm charts automatically if these annotations are omitted.
+       dragonfly.io/cli-tools-image: "dragonflyoss/cli-tools" # Specify the name of the initContainer image
+       dragonfly.io/cli-tools-version: "v0.0.1" # Specify the version of the initContainer image
    spec:
      initContainers: # Injected by the webhook
-       - name: d7y-p2p-injector
-         image: dragonflyoss/d7y-p2p-injector:2.2.3
-         command: ["cp", "/usr/local/bin/dfget", "/dfget-tool/dfget"] # Copy dfget to the shared volume
+       - name: cli-tools
+         image: dragonflyoss/cli-tools:v0.0.1
          volumeMounts:
-           - name: binary-shared-data
-             mountPath: /binary-tool
+           - name: dragonfly-tools-volume
+             mountPath: /dragonfly-tools
      containers:
        - name: test-app-container
          image: test-app-image:latest
          env:
            - name: PATH
-             value: "/binary-tool:$(PATH)" # Add to the environment variable
+             value: "/dragonfly-tools:$(PATH)" # Add to the PATH environment variable
          volumeMounts:
-           - name: binary-shared-data
-             mountPath: /binary-tool
+           - name: dragonfly-tools-volume
+             mountPath: /dragonfly-tools
      volumes:
-       - name: binary-shared-data
+       - name: dragonfly-tools-volume
          emptyDir: {}
    ```
 
