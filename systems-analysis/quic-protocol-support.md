@@ -167,73 +167,76 @@ impl Downloader for QUICDownloader {
 
 ### Performance 
 
-#### Congestion Control 
+#### Zero-Copy
+
+Using `sendfile` for efficient data transfer:
 
 ```rust
-async fn tune_congestion_control(&self, metrics: &QuicMetrics) -> Result<()> {
-    let mut base_config = &mut self.tuning_config.base_config;
+/// read_piece reads the piece from the content.
+    #[instrument(skip_all)]
+    pub async fn read_piece(
+        &self,
+        socket_fd: c_int,
+        task_id: &str,
+        offset: u64,
+        length: u64,
+        range: Option<Range>,
+    ) {
+        let task_path = self.get_task_path(task_id);
 
-    // Adjust the congestion window based on the packet loss rate
-    if metrics.packet_loss_rate > 0.1 {
-        // High packet loss rate, reduce the congestion window
-        base_config.max_congestion_window = (base_config.max_congestion_window as f64 * 0.8) as u32;
-        base_config.initial_congestion_window = (base_config.initial_congestion_window as f64 * 0.8) as u32;
-    } else if metrics.packet_loss_rate < 0.01 && metrics.throughput < base_config.max_congestion_window as u64 {
-        // Low packet loss rate and throughput not reaching the upper limit, increase the congestion window
-        base_config.max_congestion_window = (base_config.max_congestion_window as f64 * 1.2) as u32;
-        base_config.initial_congestion_window = (base_config.initial_congestion_window as f64 * 1.2) as u32;
+        // Calculate the target offset and length based on the range.
+        let (target_offset, target_length) = calculate_piece_range(offset, length, range);
+
+        let f = File::open(task_path.as_path()).await.inspect_err(|err| {
+            error!("open {:?} failed: {}", task_path, err);
+        })?;
+
+        // Original Implementation
+        // let mut f_reader = BufReader::with_capacity(self.config.storage.read_buffer_size, f);
+        // f_reader
+        //     .seek(SeekFrom::Start(target_offset))
+        //     .await
+        //     .inspect_err(|err| {
+        //         error!("seek {:?} failed: {}", task_path, err);
+        //     })?;
+        // Ok(f_reader.take(target_length))
+
+        //Sendfile Implementation
+        task::spawn_blocking(move || {
+            unsafe {
+                libc::sendfile(socket_fd, f, target_offset, target_length)
+            }
+        }).await?;
     }
-
-    Ok(())
-}
 ```
 
-#### Flow Control 
+#### Quinn Configuration
+
+Using `quinn` for efficient data transfer:
+
+##### Server
 
 ```rust
-async fn tune_flow_control(&self, metrics: &QuicMetrics) -> Result<()> {
-    let mut base_config = &mut self.tuning_config.base_config;
-
-    // Adjust the maximum number of concurrent streams based on the number of active streams
-    if metrics.active_streams > base_config.max_concurrent_streams as u64 * 80 / 100 {
-        // The number of active streams is close to the upper limit, increase the maximum number of concurrent streams
-        base_config.max_concurrent_streams = (base_config.max_concurrent_streams as f64 * 1.2) as u32;
-    } else if metrics.active_streams < base_config.max_concurrent_streams as u64 * 20 / 100 {
-        // The number of active streams is far below the upper limit, reduce the maximum number of concurrent streams
-        base_config.max_concurrent_streams = (base_config.max_concurrent_streams as f64 * 0.8) as u32;
-    }
-
-    Ok(())
-}
+let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, key)?;
+server_config.transport = optimized_quinn_transport_config();
+let endpoint = quinn::Endpoint::server(server_config, listen_addr)?;
 ```
-
-#### Retransmission 
+##### Client
 
 ```rust
-async fn tune_retransmission(&self, metrics: &QuicMetrics) -> Result<()> {
-    let mut base_config = &mut self.tuning_config.base_config;
-
-    // Adjust RTT and ACK delay based on the retransmission rate
-    if metrics.retransmission_rate > 0.1 {
-        // High retransmission rate, increase RTT estimate and ACK delay
-        base_config.initial_rtt = (base_config.initial_rtt as f64 * 1.2) as u32;
-        base_config.max_ack_delay = (base_config.max_ack_delay as f64 * 1.2) as u32;
-    } else if metrics.retransmission_rate < 0.01 {
-        // Low retransmission rate, reduce RTT estimate and ACK delay
-        base_config.initial_rtt = (base_config.initial_rtt as f64 * 0.8) as u32;
-        base_config.max_ack_delay = (base_config.max_ack_delay as f64 * 0.8) as u32;
-    }
-
-    Ok(())
-}
+let mut client_config = quinn::ClientConfig::default();
+client_config.transport_config(optimized_quinn_transport_config());
+let mut endpoint = quinn::Endpoint::client("[::]:0".parse().unwrap())?;
+endpoint.set_default_client_config(client_config);
 ```
 
-#### QUIC Parameters
+#### Quinn Parameters
 
-- **Concurrency Latency**: 0-RTT connections for low handshake latency
-- **Transmission Latency**: Maximum ACK delay adjustment for low acknowledgment latency
-- **Congestion Control**: BBR algorithm for high-bandwidth networks
-- **Connection Management**: Connection pooling with idle timeout
+- **Flow Control**: Each connection supports multiple concurrent streams, dynamically adjust flow control window size and multiplex multiple data streams on a single connection
+- **Connection Management**: Avoid the overhead of frequently establishing and destroying connections
+ , automatically clean up idle connections,prevent resource exhaustion from too many connections
+- **Congestion Control**: BBR algorithm and cubic for high-bandwidth networks 
+- **0-RTT**: Enable 0-RTT to reduce connection establishment time
 
 ### Configuration
 
