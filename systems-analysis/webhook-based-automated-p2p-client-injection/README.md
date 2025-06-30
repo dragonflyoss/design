@@ -184,7 +184,37 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
 
 ## Webhook Details
 
-1. **P2P Proxy Environment Variable Injection**:
+1. **Annotation(label)-based Injection Scope**:
+   The webhook supports injecting P2P configurations based on annotations(labels) at both the namespace and pod levels. By adding a specific label to a namespace, all pods within that namespace will have the P2P capabilities automatically injected. Additionally, pods can be annotated to enable or customize the injection. The priority of annotations is as follows: `pod-level annotations` > `namespace-level labels` > `webhook default config`.
+
+   - Namespace injection:
+
+     ```yaml
+     apiVersion: v1
+     kind: Namespace
+     metadata:
+       labels:
+         dragonflyoss-injection: enabled
+       name: test-namespace
+     ```
+
+   - Pod injection:
+
+     ```yaml
+     apiVersion: v1
+     kind: Pod
+     metadata:
+       name: test-pod
+       namespace: test-namespace
+       annotations:
+         dragonfly.io/inject: "true"
+     spec:
+       containers:
+         - image: test-pod-image
+           name: test-container
+     ```
+
+2. **P2P Proxy Environment Variable Injection**:
    To enable application traffic within the Pod to pass through the Dragonfly P2P network proxy, the Webhook will inject environment variables such as `DRAGONFLY_INJECT_PROXY` into the application container of the target Pod. The proxy address will be dynamically constructed, where the node name or IP can be obtained via the Downward API (`spec.nodeName` or `status.hostIP`), and the proxy port is retrieved from the Webhook configuration or Helm Chart, forming a proxy address in the form of `http://$(NODE_NAME_OR_IP):$(DRAGONFLY_PROXY_PORT)`. A sample yaml is as follows:
 
    ```yaml
@@ -209,7 +239,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
              value: "http://$(NODE_NAME):$(DRAGONFLY_PROXY_PORT)"
    ```
 
-2. **dfdaemon Socket Volume Mounting**:
+3. **dfdaemon Socket Volume Mounting**:
    `dfget` or other clients need to communicate with the dfdaemon daemon on the node via a Unix Domain Socket. The Webhook will automatically add a hostPath Volume to the Pod to expose the Socket file based on the configuration (default is `/var/run/dfdaemon.sock`) and add the corresponding VolumeMount in the target container to ensure the client can access the Socket. A sample yaml is as follows:
 
    ```yaml
@@ -233,7 +263,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
            type: Socket
    ```
 
-3. **Cli Tool Injection**:
+4. **Cli Tool Injection**:
    Considering that many base container images do not include the cli tool (such as `dfget`), and manual installation is inconvenient, this project will solve this problem using an Init Container. The Webhook will automatically add an initContainer to the target Pod. This initContainer is a custom lightweight image available in both amd64 and arm64 architectures, each containing the corresponding architecture's cli tool. The Webhook will also copy the cli tool from this initContainer to a shared volume. Subsequently, the Webhook modifies the `PATH` environment variable of the application container to add the shared volume directory where cli is located, allowing the application container to execute cli commands directly from the command line without additional user installation or specifying the full path.
 
    The InitContainer uses Docker's manifest list to achieve the function of automatically importing the corresponding architecture initContainer, and its build commands are as follows:
