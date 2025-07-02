@@ -289,9 +289,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
      annotations:
        dragonfly.io/inject: "true" # Annotation to trigger the Webhook
        # The image and version fields only need to be added if you want to specify non-default values.
-       # The webhook will inject default values from helm charts automatically if these annotations are omitted.
-       dragonfly.io/cli-tools-image: "dragonflyoss/cli-tools" # Specify the name of the initContainer image
-       dragonfly.io/cli-tools-version: "v0.0.1" # Specify the version of the initContainer image
+       dragonfly.io/cli-tools-image: "dragonflyoss/cli-tools:v0.0.1"
    spec:
      initContainers: # Injected by the webhook
        - name: cli-tools
