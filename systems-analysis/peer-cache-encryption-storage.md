@@ -29,26 +29,26 @@ Persistent Cache Storage -> Piece Reader (Decryption) -> Downloader -> P2P Netwo
 
 ### Modules
 
-A new module `dragonfly-client-crypto` will be added to handle encryption-related functionality.
+A new module `encrypt` will be added in `dragonfly-client-storage` to handle encryption-related functionality.
 
 ```
-dragonfly-client-crypto/
+dragonfly-client-storage/
 └── src/
-    ├── cryptor/
-    │   ├── crypto_type.rs
-    │   ├── piece_cryptor.rs
-    │   └── mod.rs
-    ├── algorithm/
-    │   ├── chacha20poly1305.rs
-    │   ├── ...other_algorithms.rs
-    │   └── mod.rs
-    └── lib.rs
+    ├── encrypt/
+    │   ├── mod.rs
+    │   ├── cryptor/
+    │   │   ├── mod.rs
+    │   │   ├── piece_cryptor.rs
+    │   │   └── crypto_type.rs
+    │   └── algorithm/
+    │       ├── mod.rs
+    │       └── chacha20poly1305.rs
+    └── ......
 ```
 
-* `cryptor/crypto_type.rs`: Defines the types of encryption.
-* `cryptor/piece_cryptor.rs`: Add implementation of encryptor/decryptor.
-* `algorithm/*.rs`: Add implementation of specific encryption algorithms.
-
+* `encrypt/cryptor/crypto_type.rs`: Defines encryption-related types.
+* `encrypt/cryptor/piece_cryptor.rs`: Add implementation of encryptor/decryptor.
+* `encrypt/algorithm/*.rs`: Add implementation of specific encryption algorithms.
 
 ## Implementation
 
@@ -78,17 +78,17 @@ The advantage of AES is its more widespread hardware acceleration support, makin
 
 However, on platforms without hardware support, AES's performance might not be as good as ChaCha20.
 
-Besides encryption, authentication can check if data has been maliciously tampered with, but at the cost of needing to store additional authentication information. AES-GCM and ChaCha20-Poly1305 have this capability.
+In addition to encryption, authentication can detect whether data has been tampered with, but it requires storing additional authentication information. AES-GCM and ChaCha20-Poly1305 have this capability.
 
 
-Dragonfly's current design writes Pieces to their corresponding offsets in the final file. This implies that each Piece must be encrypted prior to being written to disk to ensure no plaintext information is stored during the entire process.
+Dragonfly's current design writes Pieces to its corresponding offsets in the final file. This implies that each Piece must be encrypted prior to being written to disk to ensure no plaintext information is stored during the entire process.
 
 
 In this case, authenticated algorithms would introduce additional complexity because authentication information would need to be saved for each encrypted Piece block.
 
 Given that Dragonfly is typically deployed on servers, it is highly likely to have AES hardware acceleration, so AES speed should be optimal. 
 
-At the same time, Dragonfly uses CRC32 and other verification methods, which to some extent defend against tampering (but not completely). Authentication might not be the core task.
+At the same time, Dragonfly uses CRC32 and other verification methods, which to some extent defend against tampering (but not completely). Authentication might not be the primary concern.
 
 Different scenarios call for different suitable algorithms:
 
@@ -97,7 +97,7 @@ Different scenarios call for different suitable algorithms:
 | Tamper detection needed | AES-GCM | ChaCha20-Poly1305 |
 | Tamper detection not needed | AES-CTR | ChaCha20/XChaCha20 |
 
-Multiple encryption methods can be provided for selection in the actual code.
+Multiple encryption methods can be provided for users to choose from in the actual implementation.
 
 
 ### Configuration
@@ -106,7 +106,7 @@ Configuration options need to be added under `Config/Storage` to indicate whethe
 The `CryptoType` enum is used to represent the various algorithms.
 
 ```rust
-// dragonfly-client-crypto/src/cryptor/crypto_type.rs
+// dragonfly-client-config/src/dfdaemon.rs
 pub enum CryptoType {
     #[serde(rename = "chacha20-poly1305")]
     ChaCha20Poly1305,
@@ -114,10 +114,9 @@ pub enum CryptoType {
     AesGcm,
     #[serde(rename = "aes-ctr")]
     AesCtr,
-    
+    ......
 }
 
-// dragonfly-client-config/src/dfdaemon.rs
 pub struct Storage {
     ......
     /// enable_encryption indicates whether to enable encryption for persistent cache storage.  
@@ -159,7 +158,7 @@ If the same key and the same nonce are used to encrypt different content, an att
 
 A constructed nonce can be used to ensure uniqueness under the same key. 
 For example, by combining part of the `task_id` with part of the `piece_number`, a unique nonce value can be generated. 
-This approach eliminates the need to store a separate nonce for each piece.
+This approach removes the need to store a separate nonce for each piece.
 
 Currently, the plan is to generate a key for each `PersistentCacheTask`, and all related `Pieces` will use this key for encryption and decryption. 
 Since the algorithm used may change, the type of algorithm also needs to be recorded.
@@ -174,7 +173,7 @@ pub struct PersistentCacheTask{
     pub crypto_info: Option<CryptoInfo>,
 }
 
-// dragonfly-client-crypto/src/cryptor/crypto_type.rs
+// dragonfly-client-storage/src/encrypt/cryptor/crypto_type.rs
 pub struct CryptoInfo {
     // algorithm type
     pub crypto_type: CryptoType,
@@ -199,7 +198,7 @@ pub struct Piece {
 The `PieceCryptor` trait defines the interface for the Cryptor:
 
 ```rust
-// dragonfly-client-crypto/src/cryptor/piece_cryptor.rs
+// dragonfly-client-storage/src/encrypt/cryptor/piece_cryptor.rs
 pub struct EncryptResult {
     pub ciphertext: Vec<u8>,
     pub tag: Option<Vec<u8>>,
@@ -311,7 +310,7 @@ impl PieceCryptor for ChaCha20Poly1305Cryptor {
 By using an enum-based dispatch mechanism instead of `dyn`, it supports multiple encryption algorithm implementations:
 
 ```rust
-// dragonfly-client-crypto/src/cryptor/piece_cryptor.rs
+// dragonfly-client-storage/src/encrypt/cryptor/piece_cryptor.rs
 pub enum CryptorImpl {
     ChaCha20Poly1305(ChaCha20Poly1305Cryptor),
     // AesGcm(AesGcmCryptor),
@@ -337,9 +336,13 @@ impl CryptorImpl {
 
 `CryptorImpl` is obtained via `get_cryptor`, where the key parameter is generated according to the `CryptoType`. 
 
-Once the algorithm type is determined, the key format is also determined, so the key can be generated accordingly:
+Once the algorithm type is determined, the key format is also determined, so the key can be generated accordingly.
+
+Additionally, because `CryptoType` is defined in `dragonfly-client-config`, we cannot implement methods for structs from other modules directly. 
+As a result, we introduce `CryptoTypeExt` trait to achieve this functionality.
 
 ```rust
+// dragonfly-client-storage/src/encrypt/cryptor/piece_cryptor.rs
 pub fn get_cryptor(crypto_type: &CryptoType, key: &[u8]) -> CryptorImpl {
     match crypto_type {
         // Select the specific encryption algorithm
@@ -351,20 +354,33 @@ pub fn get_cryptor(crypto_type: &CryptoType, key: &[u8]) -> CryptorImpl {
     }
 }
 
+// can not impl because CryptoType in defined in dragonfly-client-config
+// but we are in dragonfly-client-storage
 impl CryptoType {
-    // The algorithm type determines the format of the key/nonce/tag
+    // wrong
     pub fn generate_key(&self) -> Vec<u8> {
+        ......
+    }
+}
+
+// this is right
+pub trait CryptoTypeExt {
+    fn generate_key(&self) -> Vec<u8>;
+}
+
+impl CryptoTypeExt for CryptoType {
+    fn generate_key(&self) -> Vec<u8> {
         match self {
-            // Generate the key according to the key format required by each algorithm
             CryptoType::ChaCha20Poly1305 => {
-                // TODO random key
+                // todo!("random key");
                 vec![0u8; ChaCha20Poly1305Cryptor::key_size()]
-            },
-            ......
+            }
             _ => todo!(),
         }
     }
 }
+
+
 ```
 
 Encryption/Decryption example:
