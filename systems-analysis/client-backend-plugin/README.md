@@ -6,7 +6,7 @@ This document describes the use of a plugin for the dragonfly client backend. It
 
 ### Usage
 
-The plugin for backend exists as a libxxx.so dynamic link library. Here are the steps to use it:
+The plugin for backend exists as a lib{plugin-name}.so dynamic link library. Here are the steps to use it:
 
 **1. plugin storage in the specified path**
 
@@ -27,10 +27,10 @@ INFO  load [<plugin-name>] plugin backend
 After the plugin is successfully loaded, you can download the file via dfget:
 
 ```shell
-dfget <plugin name>://<host>:<port>/<path> --output /tmp/file.txt
+dfget <plugin-name>://<host>:<port>/<path> --output /tmp/file.txt
 ```
 
-### Development Process
+### Details
 
 Before development, please refer to [Dragonfly Client](https://github.com/dragonflyoss/client/tree/main) for the [dragonfly-client-backend/examples/plugin](https://github.com/dragonflyoss/client/tree/main/dragonfly-client-backend/examples/plugin) module.
 
@@ -60,12 +60,18 @@ async fn get(&self, request: GetRequest) -> Result<GetResponse<Body>> {
 
 **Plugin Registration**
 
+Upon startup, dfdaemon scans the designated plugin path. If plugins are found, they are registered sequentially; otherwise, this step is skipped.
+
 ![](./register-plugin.jpg)
 
 **Download File**
 
+During file download, DFCaemon first obtains the file size through plugin. The file is then divided into multiple pieces based on its size, and each piece establishes an independent download task through the plugin.
+
 ![](./download-file.jpg)
 
 **Download Directory**
+
+When downloading a directory, dfget first retrieves metadata for all files within that directory, including their path and size. If the user specifies the include-files parameter, dfget filters for the files. Finally, it iterates through each remaining file to establish individual download requests.
 
 ![](./download-directory.jpg)
