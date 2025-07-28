@@ -22,7 +22,7 @@ INFO  load [<plugin-name>] plugin backend
 
 **3. Use the plugin to download files**
 
-After the plugin is successfully loaded, you can use dfget to download the file:
+After the plugin is successfully loaded, you can use `dfget` to download the file:
 
 ```shell
 dfget <plugin-name>://<host>:<port>/<path> --output /tmp/file.txt
