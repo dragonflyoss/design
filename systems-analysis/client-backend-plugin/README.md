@@ -6,13 +6,13 @@ This document describes the use of a plugin for the Dragonlfy client backend. It
 
 ### Usage
 
-The plugin for backend exists as a `lib{plugin-name}.so` dynamic link library. Here are the steps to use it:
+The plugin for backend works as a `lib{plugin-name}.so` dynamic link library. Here are the steps to use it:
 
 **1. Plugin put in the specified path**
 
 After the plugin is built, it needs to be stored in the `/usr/local/lib/dragonfly/plugins/dfdaemon/backend` path by default. This can be changed in [dfdaemon config](https://d7y.io/docs/next/reference/configuration/client/dfdaemon/).
 
-Dfdaemon will only load the plugin at startup, so dfdaemon needs to be restarted after the plugin is put in.
+Dfdaemon loads plugins only at startup, so you need to restart dfdaemon after adding a new plugin.
 
 **2. Dfdaemon loading plugin**
 
@@ -38,9 +38,9 @@ There is no need to change the code of Dragonfly Client during development. Two 
 
 `head` is used to get metadata information about the task.
 
-- For single file download, it means getting metadata such as file size.
+- For single file downloads, this refers to retrieving metadata such as the file size.
 
-- For directory download, it will get information about files in the current directory and all subdirectories, including file paths and file sizes.
+- For directory downloads, it retrieves information about all files in the current directory and its subdirectories, including their file paths and sizes.
 
 ```rust
 async fn head(&self, request: HeadRequest) -> Result<HeadResponse> {
