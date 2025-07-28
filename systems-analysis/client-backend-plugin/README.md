@@ -2,21 +2,19 @@
 
 ### Introduction
 
-This document describes the use of a plugin for the Dragonlfy client backend. It instructs developers to use the plugin to enable Dragonfly to support additional backends, such as dfs, without having to break into Dragonlfy to make code changes.
+This document describes the use of a plugin for the Dragonfly client backend. It instructs developers to use the plugin to enable Dragonfly to support additional backends.
 
 ### Usage
 
-The plugin for backend works as a `lib{plugin-name}.so` dynamic link library. Here are the steps to use it:
+The backend plugin is a dynamic link library, named in the format `lib{plugin-name}.so`.
 
-**1. Plugin put in the specified path**
+**1. Put the plugin into the plugin directory**
 
-After the plugin is built, it needs to be stored in the `/usr/local/lib/dragonfly/plugins/dfdaemon/backend` path by default. This can be changed in [dfdaemon config](https://d7y.io/docs/next/reference/configuration/client/dfdaemon/).
+After the plugin is built, it needs to be put into the `/usr/local/lib/dragonfly/plugins/dfdaemon/backend` path by default. This can be changed in the [dfdaemon config](https://d7y.io/docs/next/reference/configuration/client/dfdaemon/). `dfdaemon` does not support hot reloading of plugins.
 
-Dfdaemon loads plugins only at startup, so you need to restart dfdaemon after adding a new plugin.
+**2. Loading Plugins**
 
-**2. Dfdaemon loading plugin**
-
-When dfdaemon starts, the following logs are included in the dfdaemon startup log, which means that the plugin was loaded successfully.
+A successful plugin load will produce the following log messages:
 
 ```
 INFO  load [<plugin-name>] plugin backend
@@ -32,12 +30,11 @@ dfget <plugin-name>://<host>:<port>/<path> --output /tmp/file.txt
 
 ### Details
 
-Before development, please refer to [Dragonfly Client](https://github.com/dragonflyoss/client/tree/main) for the [dragonfly-client-backend/examples/plugin](https://github.com/dragonflyoss/client/tree/main/dragonfly-client-backend/examples/plugin) module.
+Before you begin development, refer to the [plugin examples](https://github.com/dragonflyoss/client/tree/main/dragon-client-backend/examples/plugin) for guidance.
 
-There is no need to change the code of Dragonfly Client during development. Two interfaces of Backend is important for you to implemet, `head` and `get`.
+The backend plugin requires the implementation of two main interfaces: `head` and `get`.
 
-`head` is used to get metadata information about the task.
-
+`head` is used to get metadata of the task.
 - For single file downloads, this refers to retrieving metadata such as the file size.
 
 - For directory downloads, it retrieves information about all files in the current directory and its subdirectories, including their file paths and sizes.
@@ -48,8 +45,7 @@ async fn head(&self, request: HeadRequest) -> Result<HeadResponse> {
 }
 ```
 
-`get` is used to download the corresponding piece of task.
-
+`get` is used to download the content of piece.
 ```rust
 async fn get(&self, request: GetRequest) -> Result<GetResponse<Body>> {
     ...
@@ -60,18 +56,20 @@ async fn get(&self, request: GetRequest) -> Result<GetResponse<Body>> {
 
 **Plugin Registration**
 
-Upon startup, dfdaemon scans the plugin path. If plugins are found, they are registered; otherwise, this step is skipped.
+Upon startup, `dfdaemon` scans the plugin path.
+
+If plugins are found, they are registered. Otherwise, this step is skipped.
 
 ![](./register-plugin.jpg)
 
 **Download File**
 
-During file download, dfdaemon first heads the file size through plugin. The file is then divided into multiple pieces based on its size, and each piece establishes an independent download task through the plugin.
+During file download, `dfdaemon` first heads the file metadata through plugin. The file is split into multiple pieces based on its size, with each piece downloaded independently via the plugin's get request.
 
 ![](./download-file.jpg)
 
 **Download Directory**
 
-When downloading a directory, dfget use dfdaemon first head metadata for all files within that directory, including their url path and size. If the user specifies the `include-files` parameter, dfget filters for the files. Finally, it iterates through each remaining file to establish individual download requests.
+During directory download, `dfdaemon` first heads the metadatas through plugin for all files in the directory, then each file download creates a separate download request.
 
 ![](./download-directory.jpg)
