@@ -37,14 +37,14 @@ dragonfly-client-storage/
     │   ├── mod.rs
     │   ├── cryptor/
     │   │   ├── mod.rs
-    │   │   ├── piece_cryptor.rs
+    │   │   ├── reader.rs
     │   └── algorithm/
     │       ├── mod.rs
     │       └── aes_ctr.rs
     └── ......
 ```
 
-* `encrypt/cryptor/piece_cryptor.rs`: Add implementation of encryptor/decryptor.
+* `encrypt/cryptor/reader.rs`: Add implementation of encryptor/decryptor.
 * `encrypt/algorithm/*.rs`: Add implementation of specific encryption algorithms.
 
 ## Implementation
@@ -89,64 +89,16 @@ At the same time, Dragonfly uses CRC32 and other verification methods, which to 
 In this case, authentication may not be the primary concern, so AES-CTR is a good choice.
 
 
-### Configuration
-
-Configuration options need to be added under `Config/Storage` to indicate whether encrypted storage is enabled and 
-store the key from `Manager`.
-
-```rust
-// dragonfly-client-config/src/dfdaemon.rs
-/// Encryption is the storage encryption configuration for dfdaemon.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Encryption {
-    pub enable: bool,
-    /// encryption_key is the global encryption key obtained from manager at runtime.  
-    /// This field is not configurable via YAML and is populated dynamically.  
-    #[serde(skip)]  
-    pub key: Option<Vec<u8>>,
-}
-
-pub struct Storage {
-    ......
-    #[serde(default = "default_storage_encryption")] 
-    pub encryption: Encryption,
-}
-```
-
-Config yaml example:
-
-```yaml
-storage:
-  dir: /var/lib/dragonfly/
-  keep: true
-  writeBufferSize: 4194304
-  readBufferSize: 4194304
-  # ADDED
-  encryption:
-    enable: true
-```
+### Manager: Key Management
 
 
-### Key Management
+The manager is responsible for storing keys, and clients obtain keys from the manager through RPC requests.
 
-When the client starts, it sends an RPC request to the `Manager` to obtain a key, which will be used for cache encryption.
-The client does not persist the key.
+Users can specify a key in the manager's config using base64 encoding. The manager will save this key to the database and overwrite any existing key in the database. (The key in the config file has higher priority than the key in the database.)
 
-```rust
-// dragonfly-client/src/bin/dfdaemon/main.rs
-async fn main() -> Result<(), anyhow::Error> {
-    ......
-    // Initialize manager client.
-    let manager_client = ManagerClient::new(...);
-    let manager_client = Arc::new(manager_client);
+If the user does not specify a key, the manager will use the key from the database. If there is no key in the manager's database, it will randomly generate one, use it, and save it.
 
-    // Request a key from Manager
-    let key = manager_client.request_encryption_key().await?;
-    // Save key in config
-    config.storage.encryption.set_key(key);
-    ......
-}
-```
+The manager will perform this work after initializing the database.
 
 The new RPC will be defined in `dragonfly-api`.
 
@@ -170,90 +122,112 @@ message RequestEncryptionKeyResponse {
 }
 ```
 
+### Client: Configuration
 
-### Cryptor
-
-The `PieceCryptor` trait defines the interface for the Cryptor:
+Configuration options need to be added under `Config/Storage` to indicate whether encrypted storage is enabled.
 
 ```rust
-// dragonfly-client-storage/src/encrypt/cryptor/piece_cryptor.rs
+// dragonfly-client-config/src/dfdaemon.rs
+/// Encryption is the storage encryption configuration for dfdaemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Encryption {
+    pub enable: bool,
+}
 
-pub trait PieceCryptor {
-    fn encrypt(&self, plaintext: &[u8], task_id: &str, piece_num: u32) -> Result<Vec<u8>>;
-    fn decrypt(&self, ciphertext: &[u8], task_id: &str, piece_num: u32) -> Result<Vec<u8>>;
+pub struct Storage {
+    ......
+    #[serde(default = "default_storage_encryption")] 
+    pub encryption: Encryption,
+}
+```
+
+Config yaml example:
+
+```yaml
+storage:
+  dir: /var/lib/dragonfly/
+  keep: true
+  writeBufferSize: 4194304
+  readBufferSize: 4194304
+  # ADDED
+  encryption:
+    enable: true
+```
+
+
+### Client: Request Key
+
+When the client starts, it sends an RPC request to the `Manager` to obtain a key, which will be used for cache encryption.
+
+The client does not persist the obtained key, so it will request a key from the manager every time it restarts.
+
+```rust
+// dragonfly-client/src/bin/dfdaemon/main.rs
+async fn main() -> Result<(), anyhow::Error> {
+    ......
+    // Initialize manager client.
+    let manager_client = ManagerClient::new(...);
+    let manager_client = Arc::new(manager_client);
+
+    // Request a key from Manager
+    let key = manager_client.request_encryption_key().await?;
+    // Pass key as a parameter of Storage
+    let storage = Storage::new(..., key).await?;
+    ......
+}
+```
+
+### Client: Cryptor
+
+The `EncryptAlgo` trait defines the interface for the Encryption alogorithm.
+
+```rust
+// dragonfly-client-storage/src/encrypt/algorithm/mod.rs
+
+pub trait EncryptAlgo {
+    const NONCE_SIZE: usize;
+    const KEY_SIZE: usize;
+
+    fn new(key: &[u8], nonce: &[u8]) -> Self;
+
+    fn apply_keystream(&mut self, data: &mut [u8]);
+
+    fn build_nonce(task_id: &str, piece_num: u32);
 }
 ```
 
 `task_id` and `piece_num` are used to construct the nonce.
 
-The `encrypt` function returns an `Vec<u8>` as the encrypted `ciphertext`.
+The `apply_keystream` function performs in-place encryption/decryption on `data`.
 
-The `decrypt` function returns an `Vec<u8>` as the `plaintext`.
+---
 
-Below is an example implementation of `PieceCryptor` using the AES-CTR algorithm:
+`EncryptReader`/`DecryptReader` provides asynchronous encryption/decryption capabilities. 
+It can adapt well to existing impl AsyncRead parameter types.
 
 ```rust
-use aes::Aes256;
-use ctr::Ctr128BE;
-
-pub struct AesCtrCryptor {
-    cipher: Ctr128BE<Aes256>,
+// dragonfly-client-storage/src/encrypt/cryptor/reader.rs
+pub struct EncryptReader<R, A: EncryptAlgo> {
+    inner: R,
+    cipher: A,
 }
 
-impl AesCtrCryptor {
-    pub fn new(key: &[u8]) -> Self {
-        let key = Key::from_slice(key);
-        Self {
-            // use RustCrypto crate
-            cipher: Ctr128BE<Aes256>::new(key),
-        }
-    }
-
-    // construct nonce from task_id and piece_number, it does not need to be loaded/saved from/to disk
-    fn build_nonce(task_id: &str, piece_num: u32) -> Vec<u8> {
-        // Take certain bytes from task_id and piece_num to form the nonce.
-        // For example, use the first 12 bytes of task_id and the first 4 bytes of piece_num to construct a 16-byte nonce.
-        ......
-    }
-
-}
-
-impl PieceCryptor for AesCtrCryptor {
-    fn encrypt(&self, plaintext: &[u8], task_id: &str, piece_num: u32) -> Result<EncryptResult>{
-        let nonce = Self::build_nonce(task_id, piece_num);
-        
-        // Construct the nonce and use the key to perform encryption.
-        let res = self
-            .cipher
-            .encrypt(nonce, plaintext)?;
-        
-        Ok(res)
-    }
-
-    fn decrypt(&self, ciphertext: &[u8], task_id: &str, piece_num: u32) -> Result<Vec<u8>>{
-        // The process of constructing the nonce is the same as in encryption.
-
-        // decrypt
-        let plaintext = self
-            .cipher
-            .decrypt(nonce, combined_slice)?;
-
-        Ok(plaintext)
-    }
+impl<R: AsyncRead + Unpin, A: EncryptAlgo> AsyncRead for EncryptReader<R, A> {
+    // implement AsyncRead
+    ......
 }
 ```
 
 
-### Piece Encryption/Decryption
+
+### Client: Piece Encryption/Decryption
 
 The main changes are focused in `dragonfly-client-storage/src/lib.rs` and `dragonfly-client-storage/src/content.rs`.
 
 When encryption is enabled, writing a `Piece` involves the following steps:
-1. Read the plaintext of the `Piece` into memory
-2. Calculate the CRC from the plaintext
-3. Use the key obtained from the Manager and the constructed nonce to encrypt the data and obtain the ciphertext
-4. Write the ciphertext to the same position in the file
-
+1. Get the key for encryption
+2. Create an `EncryptReader` to wrap the original `impl AsyncRead` parameter
+3. Use the `EncryptReader` to copy the ciphertext to the corresponding position in the file
 
 ```rust
 // dragonfly-client-storage/src/content.rs
@@ -264,59 +238,37 @@ pub async fn write_persistent_cache_piece<R: AsyncRead + Unpin + ?Sized>(
     piece_id: &str,
 ) -> Result<WritePieceResponse> {
     // original code ↓
-    // Open the file and seek to the offset.
-    let task_path = self.get_persistent_cache_task_path(task_id);
-    let mut f = OpenFile...?;
-
-    f.seek(......)?;
+    // Open the target file and set CRC32 hasher
+    let writer = ...
+    let tee = hasher_inspect_reader();
     // original code ↑
 
-    // ADDED need encrypt
-    if self.config.storage.encryption.enable {
-        // 1. read plaintext
-        let mut plaintext = Vec::new();
-        reader.read_to_end(&mut plaintext).await?;
-
-        // 2. use plaintext to calculate crc
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&plaintext);
-        let hash = hasher.finalize().to_string();
-
-        // 3. encrypt
-        let cryptor = get_cryptor(self.config.storage.encryption.key);
-        let ciphertext = cryptor.encrypt_piece_by_id(&plaintext, piece_id)?;
-
-        // 4. write
-        let mut writer = BufWriter::with_capacity(self.config.storage.write_buffer_size, f);
-        writer.write_all(&ciphertext).await?;
-        writer.flush().await?;
-
-        // check length
-        if ciphertext.len() as u64 != expected_length {
-            ......
-        }
-
-        Ok(WritePieceResponse {
-            length: ciphertext.len() as u64,
-            hash: hash,
-        })
-
+    // Modified
+    let mut tee_warpper = if self.config.storage.encryption.enable {
+        // 1. get key
+        let key = get_key();
+        // 2. use EncryptReader
+        let encrypt_reader = EncryptReader::new(tee, key, ...);
+        Either::Left(encrypt_reader)
     } else {
-        // if don not need encryption, do original process
-        ......
-        Ok(WritePieceResponse {
-            length,
-            hash: hasher.finalize().to_string(),
-        })
-    }
+        Either::Right(tee)
+    };
+
+    // 3. copy to file
+    let length = io::copy(&mut tee_warpper, &mut writer).await.inspect_err(|err| {
+        error!("copy {:?} failed: {}", task_path, err);
+    })?;
+    
+    ......
 }
 ```
 
 ---
 
 When encryption is enabled, reading a `Piece` involves the following steps:
-1. Read the ciphertext of the `Piece` from the file into memory
-2. Use the key obtained from the Manager and the constructed nonce to decrypt the data and obtain the plaintext
+1. Get the key for encryption
+2. Create an `DecryptReader` to wrap the original `impl AsyncRead` parameter
+3. Return the `DecryptReader`
 
 ```rust
 // dragonfly-client-storage/src/content.rs
@@ -327,28 +279,28 @@ pub async fn read_persistent_cache_piece(
     piece_id: &str,
 ) -> Result<impl AsyncRead> {
     // original code ↓
-    let f = File::open(......)?;
-    let mut f_reader = BufReader::with_capacity(self.config.storage.read_buffer_size, f);
-
-    f_reader.seek(......)
+    // Open file
+    let f_reader = ...;
     // original code ↑
 
     // ADDED
-    let res = if self.config.storage.encryption.enable {
-        // Read ciphertext from file
-        let mut ciphertext = vec![0u8; target_length as usize];
-        f_reader.read_exact(&mut ciphertext).await?;
+    if self.config.storage.encryption.enable {
+        // 1. get key
+        let key = get_key();
+        
+        let limited_reader = f_reader.take(target_length);
+        // 2. use DecryptReader
+        let decrypt_reader = DecryptReader::new(
+            limited_reader, 
+            key, 
+            piece_id
+        );
 
-        // decryption
-        let cryptor = get_cryptor(self.config.storage.encryption.key);
-        let plaintext = cryptor.decrypt_piece_by_id(&ciphertext, piece_id)?;
+        // 3. return DecryptReader
+        return Ok(Either::Left(decrypt_reader));
+    }
 
-        Either::Left(Cursor::new(plaintext))
-    } else {
-        Either::Right(f_reader.take(target_length))
-    };
-
-    Ok(res)
+    Ok(Either::Right(f_reader.take(target_length)))
 }
 ```
 
@@ -377,3 +329,10 @@ pub async fn read_persistent_cache_piece(
 This design provides a foundation for adding P2P Peer Cache Encryption Storage to Dragonfly while maintaining system stability and backward compatibility.
 
 <!-- **Issue Link**: [Encrypted storage for P2P peer node cache.](https://github.com/dragonflyoss/dragonfly/issues/4026) -->
+
+
+# TODO
+
+- [ ] Graph in Architecture
+- [ ] Normal `Task` Implementation
+
