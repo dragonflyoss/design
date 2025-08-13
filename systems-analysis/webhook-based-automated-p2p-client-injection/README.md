@@ -1,4 +1,4 @@
-# Mutating Admission Webhook for Automatic P2P Injection in Dragonfly
+# Mutating Admission Webhook for Automatic P2P Injection
 
 ## Overview
 
@@ -207,7 +207,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
        name: test-pod
        namespace: test-namespace
        annotations:
-         dragonfly.io/inject: "true"
+         dragonfly.io/inject: 'true'
      spec:
        containers:
          - image: test-pod-image
@@ -223,7 +223,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
    metadata:
      name: test-pod
      annotations:
-       dragonfly.io/inject: "true" # webhook listens for this annotation
+       dragonfly.io/inject: 'true' # webhook listens for this annotation
    spec:
      containers:
        - name: test-pod-cotainer
@@ -234,9 +234,9 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
                fieldRef:
                  fieldPath: spec.nodeName
            - name: DRAGONFLY_PROXY_PORT # Port value obtained from Helm Chart
-             value: "8001" # Assume the Helm Chart sets the port to 8001
+             value: '8001' # Assume the Helm Chart sets the port to 8001
            - name: DRAGONFLY_INJECT_PROXY # Concatenated proxy address
-             value: "http://$(NODE_NAME):$(DRAGONFLY_PROXY_PORT)"
+             value: 'http://$(NODE_NAME):$(DRAGONFLY_PROXY_PORT)'
    ```
 
 3. **dfdaemon Socket Volume Mounting**:
@@ -248,7 +248,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
    metadata:
      name: test-app-with-dfdaemon-socket
      annotations:
-       dragonfly.io/inject: "true" # Annotation to trigger the Webhook
+       dragonfly.io/inject: 'true' # Annotation to trigger the Webhook
    spec:
      containers:
        - name: test-app-container
@@ -287,9 +287,9 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
    metadata:
      name: test-app-with-cli-tools-image
      annotations:
-       dragonfly.io/inject: "true" # Annotation to trigger the Webhook
+       dragonfly.io/inject: 'true' # Annotation to trigger the Webhook
        # The image and version fields only need to be added if you want to specify non-default values.
-       dragonfly.io/cli-tools-image: "dragonflyoss/cli-tools:v0.0.1"
+       dragonfly.io/cli-tools-image: 'dragonflyoss/cli-tools:v0.0.1'
    spec:
      initContainers: # Injected by the webhook
        - name: cli-tools
@@ -302,7 +302,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
          image: test-app-image:latest
          env:
            - name: PATH
-             value: "/dragonfly-tools:$(PATH)" # Add to the PATH environment variable
+             value: '/dragonfly-tools:$(PATH)' # Add to the PATH environment variable
          volumeMounts:
            - name: dragonfly-tools-volume
              mountPath: /dragonfly-tools

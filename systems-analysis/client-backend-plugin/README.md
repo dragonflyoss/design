@@ -35,6 +35,7 @@ Before you begin development, refer to the [plugin examples](https://github.com/
 The backend plugin requires the implementation of two main interfaces: `head` and `get`.
 
 `head` is used to get metadata of the task.
+
 - For single file downloads, this refers to retrieving metadata such as the file size.
 
 - For directory downloads, it retrieves information about all files in the current directory and its subdirectories, including their file paths and sizes.
@@ -46,6 +47,7 @@ async fn head(&self, request: HeadRequest) -> Result<HeadResponse> {
 ```
 
 `get` is used to download the content of piece.
+
 ```rust
 async fn get(&self, request: GetRequest) -> Result<GetResponse<Body>> {
     ...

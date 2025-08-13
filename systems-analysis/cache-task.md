@@ -1,4 +1,4 @@
-# CacheTask Support in Dragonfly
+# Cache Task
 
 ## Overview
 
@@ -24,18 +24,18 @@ flowchart TD
     dfdaemon --> Task
     dfdaemon --> PersistentCacheTask["Persistent Cache Task"]
     dfdaemon --> CacheTask
-    
+
     Task --> SchedulerClient1["Scheduler Client"]
     Task --> StorageSystem1["Storage System"]
     Task --> PieceManager1["Piece Manager"]
-    
+
     StorageSystem1 --> Content1["Content"]
     StorageSystem1 --> Metadata1["Metadata"]
-    
+
     PersistentCacheTask --> SchedulerClient2["Scheduler Client"]
     PersistentCacheTask --> StorageSystem2["Storage System"]
     PersistentCacheTask --> PieceManager2["Piece Manager"]
-    
+
     StorageSystem2 --> Content2["Content"]
     StorageSystem2 --> Metadata2["Metadata"]
 
@@ -56,9 +56,9 @@ client-rs/dragonfly-client-storage/src
 
 client-rs/dragonfly-client/src
 |-grpc
-|   |-scheduler.rs    // Add scheduler communication functions related to cache task   
+|   |-scheduler.rs    // Add scheduler communication functions related to cache task
 |   |-dfdaemon_download.rs   // Add cache task download function
-|   |-dfdaemon_upload.rs   // Add cache task upload function 
+|   |-dfdaemon_upload.rs   // Add cache task upload function
 |-gc/mod.rs // Add GC support for cache task
 |-bin/dfget/main.rs     // Add --cache parameter to indicate downloading with cache task
 |-resource
@@ -79,9 +79,9 @@ scheduler
 |   |   |-evaluator.go  // Add evaluation methods for cache task
 |-service/service_v2.go // Implement service methods for cache task
 |-resource/standardcache
-|   |-host_manager_test.go 
+|   |-host_manager_test.go
 |   |-host_manager.go   // cache host manager
-|   |-host.go   // cache host definition 
+|   |-host.go   // cache host definition
 |   |-peer_manager_test.go
 |   |-peer_manager.go   // cache peer manager
 |   |-peer_test.go
@@ -89,7 +89,7 @@ scheduler
 |   |-piece_test.go
 |   |-piece.go  // piece definition
 |   |-resource_test.go
-|   |-resource.go   // Cache Resource interface and implementation 
+|   |-resource.go   // Cache Resource interface and implementation
 |   |-seed_peer_client_test.go
 |   |-seed_peer_client.go   // seed peer client interface and implementation
 |   |-seed_peer_test.go
@@ -109,17 +109,17 @@ pkg
 
 ### Client
 
-#### Dfget User Interface 
+#### Dfget User Interface
 
 Users can add the --cache parameter in dfget to indicate that the download should be performed based on CacheTask.
 
 ```rust
 struct Arg{
-    #[arg(  
-        long = "cache",  
-        default_value_t = false,  
-        help = "Use cache task for download"  
-    )]  
+    #[arg(
+        long = "cache",
+        default_value_t = false,
+        help = "Use cache task for download"
+    )]
     cache: bool,
 }
 async fn download(
@@ -129,16 +129,15 @@ async fn download(
 ) -> Result<()>{
     //PreProcess
 
-    if args.cache {   
+    if args.cache {
         let response = download_client.download_cache_task(DownloadCacheTaskRequest).await.inspect_err(|err| { error!("download cache task failed: {}",err)});
-    } else {   
-        let response = download_client.download_task(DownloadTaskRequest).await.inspect_err(|err| { error!("download task failed: {}",err)}); 
+    } else {
+        let response = download_client.download_task(DownloadTaskRequest).await.inspect_err(|err| { error!("download task failed: {}",err)});
     };
 
     //PostProcess
 }
 ```
-
 
 #### CacheTask
 
@@ -244,15 +243,15 @@ Support for cache tasks needs to be added to the Storage module, and remove cach
 ```rust
 impl Storage{
     pub fn get_cache_task(&self, id: &str) -> Result<Option<metadata::CacheTask>> // Return the metadata of the cache task.
-    
+
     pub async fn prepare_download_cache_task_started(&self, id: &str) -> Result<metadata::CacheTask> // When the cache task is downloading, prepare the metadata of the cache task.
-    
+
     pub fn download_cache_task_finished(&self, id: &str) -> Result<metadata::CacheTask> // When the cache task download is finished, update the metadata of the cache task.
-    
+
     pub async fn prefetch_cache_task_started(&self, id: &str) -> Result<metadata::CacheTask> // When the cache task prefetch starts, update the metadata of the cache task.
-    
+
     pub fn upload_cache_task_finished(&self, id: &str) -> Result<metadata::CacheTask> // When the cache task upload is finished, update the metadata of the cache task.
-    
+
     pub async fn delete_cache_task(&self, id: &str) // Delete the cache task metadata and corresponding resources.
 
     pub fn is_cache_task_exists(&self, id: &str) -> Result<bool> // Check if the cache task exists.
@@ -322,7 +321,6 @@ impl Storage{
 
 ```
 
-
 #### Cache
 
 The current Cache module interface uses a piece ID-based addressing mode, while the content module uses a byte offset and length-based addressing mode, creating a semantic inconsistency. To achieve uniformity and interoperability of the storage layer interface and to add a corresponding Cache module for CacheTask, it is necessary to modify Cache, which uses an offset-length addressing mode.
@@ -336,7 +334,7 @@ pub struct Cache {
 }
 impl Cache {
     pub fn new(config: Arc<Config>) -> Self
-    
+
     // Read the content in a task based on offset, length and range.
     pub async fn read_piece(&self, task_id: &str, offset: u64, length: u64, range: Option<Range>)-> Result<impl AsyncRead>{
         let mut tasks = self.tasks.write().await;
@@ -363,24 +361,24 @@ impl Cache {
 
     // Write content to Cache based on the offset.
     pub async fn write_piece(&self, task_id: &str, offset: u64,  content: Bytes) -> Result<()> {
-        let mut tasks = self.tasks.write().await;  
-        let Some(task_content) = tasks.get(task_id) else {  
-            return Err(Error::TaskNotFound(task_id.to_string()));  
-        };  
-        
+        let mut tasks = self.tasks.write().await;
+        let Some(task_content) = tasks.get(task_id) else {
+            return Err(Error::TaskNotFound(task_id.to_string()));
+        };
+
         // Check if the write range is valid.
-        let start = offset;  
-        let end = start + content.len();  
-        if end > task_content.len() {  
-            return Err(Error::InvalidParameter);  
-        }  
-        
+        let start = offset;
+        let end = start + content.len();
+        if end > task_content.len() {
+            return Err(Error::InvalidParameter);
+        }
+
         // Write data directly to the specified offset.
-        let mut task_vec = task_content.to_vec();  
-        task_vec[start..end].copy_from_slice(&content);  
-        *task_content = Bytes::from(task_vec);  
-        
-        Ok(())  
+        let mut task_vec = task_content.to_vec();
+        task_vec[start..end].copy_from_slice(&content);
+        *task_content = Bytes::from(task_vec);
+
+        Ok(())
     }
 
     // Pre-allocate memory for a task in Cache.
@@ -404,38 +402,38 @@ impl Cache {
             }
         }
 
-        let empty_content = Bytes::from(vec![0u8; content_length as usize]);  
-        tasks.put(task_id.to_string(), empty_content);  
+        let empty_content = Bytes::from(vec![0u8; content_length as usize]);
+        tasks.put(task_id.to_string(), empty_content);
         self.size += content_length;
     }
 
     // Delete a task from Cache.
-    pub async fn delete_cache_task(&mut self, task_id: &str) -> Result<()> {  
-        let mut tasks = self.tasks.write().await;  
-        let Some((_, task_content)) = tasks.pop(task_id) else {  
-            return Err(Error::TaskNotFound(task_id.to_string()));  
-        };  
-  
-        self.size -= task_content.len() as u64;  
-        Ok(())  
-    }  
-    
+    pub async fn delete_cache_task(&mut self, task_id: &str) -> Result<()> {
+        let mut tasks = self.tasks.write().await;
+        let Some((_, task_content)) = tasks.pop(task_id) else {
+            return Err(Error::TaskNotFound(task_id.to_string()));
+        };
+
+        self.size -= task_content.len() as u64;
+        Ok(())
+    }
+
     // Check if a task exists in Cache.
-    pub async fn contains_cache_task(&self, id: &str) -> bool {  
-        let tasks = self.tasks.read().await;  
-        tasks.contains(id)  
-    }  
-    
+    pub async fn contains_cache_task(&self, id: &str) -> bool {
+        let tasks = self.tasks.read().await;
+        tasks.contains(id)
+    }
+
     // Calculate the start and end positions to be written based on offset, length, and range.
-    pub fn calculate_piece_range(offset: u64, length: u64, range: Option<Range>) -> (u64, u64) {  
-        if let Some(range) = range {  
-            let target_offset = max(offset, range.start);  
-            let target_length = min(offset + length - 1, range.start + range.length - 1) - target_offset + 1;  
-            (target_offset, target_length)  
-        } else {  
-            (offset, length)  
-        }  
-    } 
+    pub fn calculate_piece_range(offset: u64, length: u64, range: Option<Range>) -> (u64, u64) {
+        if let Some(range) = range {
+            let target_offset = max(offset, range.start);
+            let target_length = min(offset + length - 1, range.start + range.length - 1) - target_offset + 1;
+            (target_offset, target_length)
+        } else {
+            (offset, length)
+        }
+    }
 }
 ```
 
@@ -533,7 +531,7 @@ pub fn download_cache_task_started(
         piece_length: Option<u64>,
         content_length: Option<u64>,
         response_header: Option<HeaderMap>,
-    ) -> Result<CacheTask> 
+    ) -> Result<CacheTask>
 
 pub fn download_cache_task_finished(&self, id: &str) -> Result<CacheTask>
 
@@ -568,15 +566,15 @@ pub async fn announce_cache_peer(
         task_id: &str,
         peer_id: &str,
         request: impl tonic::IntoStreamingRequest<Message = AnnounceCachePeerRequest>,
-    ) -> Result<tonic::Response<tonic::codec::Streaming<AnnounceCachePeerResponse>>> 
+    ) -> Result<tonic::Response<tonic::codec::Streaming<AnnounceCachePeerResponse>>>
 
-pub async fn stat_cache_peer(&self, request: StatCachePeerRequest) -> Result<CachePeer> 
+pub async fn stat_cache_peer(&self, request: StatCachePeerRequest) -> Result<CachePeer>
 
 pub async fn delete_cache_peer(&self, request: DeleteCachePeerRequest) -> Result<()>
 
-pub async fn stat_cache_task(&self, request: StatCacheTaskRequest) -> Result<CacheTask> 
+pub async fn stat_cache_task(&self, request: StatCacheTaskRequest) -> Result<CacheTask>
 
-pub async fn delete_cache_task(&self, request: DeleteCacheTaskRequest) -> Result<()> 
+pub async fn delete_cache_task(&self, request: DeleteCacheTaskRequest) -> Result<()>
 ```
 
 #### Garbage Collection
@@ -584,11 +582,10 @@ pub async fn delete_cache_task(&self, request: DeleteCacheTaskRequest) -> Result
 Need to add support for cache task garbage collection functionality.
 
 ```rust
-async fn evict_cache_task_by_ttl(&self) -> Result<()> 
+async fn evict_cache_task_by_ttl(&self) -> Result<()>
 
-async fn delete_cache_task_from_scheduler(&self, task: metadata::CacheTask) 
+async fn delete_cache_task_from_scheduler(&self, task: metadata::CacheTask)
 ```
-
 
 ### Server
 
@@ -742,15 +739,12 @@ type Scheduling interface {
 
 ```
 
-
-
 ## Testing
 
 1. **Unit Tests**: Test individual components with a coverage of over 85%.
 2. **Integration Tests**: End-to-end functional verification.
 3. **Performance Tests**: Performance comparison between CacheTask and Task.
 4. **Stress Tests**: High-concurrency testing.
-
 
 ## Compatibility
 
