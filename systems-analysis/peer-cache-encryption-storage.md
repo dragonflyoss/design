@@ -2,7 +2,8 @@
 
 ## Overview
 
-This design document proposes adding encryption storage for peer cache in Dragonfly's P2P file transfer mechanism. The goal is to enhance data security for cached files within the P2P network, ensuring that sensitive information remains protected during storage and transfer.
+This design document proposes adding encryption storage for peer cache in Dragonfly's P2P file transfer mechanism. 
+The goal is to enhance data security for cached files within the P2P network, ensuring that sensitive information remains protected during storage and transfer.
 
 ## Motivation
 
@@ -19,12 +20,28 @@ This design document proposes adding encryption storage for peer cache in Dragon
 
 ## Architecture
 
-The proposed architecture involves introducing an encryption module within the Dragonfly client's storage layer. This module will intercept data during writing to and reading from the persistent cache, performing encryption and decryption operations respectively.
+The proposed architecture involves introducing an encryption module within the Dragonfly client's storage layer. 
+This module will intercept data during writing to and reading from the persistent cache, performing encryption and decryption operations respectively.
 
+```mermaid
+sequenceDiagram
+    participant storage as Storage
+    participant content as Content
+
+    activate storage
+    storage->>content: read_persistent_cache_piece()
+
+    activate content
+    alt disable encryption(default)
+        content-->>storage: BufReader
+    else enable encryption
+        content-->>storage: DecryptReader
+    end
+
+    deactivate content
+    deactivate storage
 ```
-P2P Network -> Downloader -> Piece Writer (Encryption) -> Persistent Cache Storage
-Persistent Cache Storage -> Piece Reader (Decryption) -> Downloader -> P2P Network
-```
+
 
 ### Modules
 
@@ -74,10 +91,11 @@ The advantage of AES is its more widespread hardware acceleration support, makin
 
 However, on platforms without hardware support, AES's performance might not be as good as ChaCha20.
 
-In addition to encryption, authentication can detect whether data has been tampered with, but it requires storing additional authentication information. AES-GCM and ChaCha20-Poly1305 have this capability.
+In addition to encryption, authentication can detect whether data has been tampered with, but it requires storing additional authentication information. 
+AES-GCM and ChaCha20-Poly1305 have this capability.
 
-
-Dragonfly's current design writes Pieces to its corresponding offsets in the final file. This implies that each Piece must be encrypted prior to being written to disk to ensure no plaintext information is stored during the entire process.
+Dragonfly's current design writes Pieces to its corresponding offsets in the final file. 
+This implies that each Piece must be encrypted prior to being written to disk to ensure no plaintext information is stored during the entire process.
 
 
 In this case, authenticated algorithms would introduce additional complexity because authentication information would need to be saved for each encrypted Piece block.
@@ -94,11 +112,80 @@ In this case, authentication may not be the primary concern, so AES-CTR is a goo
 
 The manager is responsible for storing keys, and clients obtain keys from the manager through RPC requests.
 
-Users can specify a key in the manager's config using base64 encoding. The manager will save this key to the database and overwrite any existing key in the database. (The key in the config file has higher priority than the key in the database.)
+Users can specify a key in the manager's config using base64 encoding. The manager will save this key to the database and overwrite any existing key in the database. 
+(The key in the config file has higher priority than the key in the database.)
+
+```yaml
+# Manager configuration.
+encryption:
+  enable: true
+  # base64
+  key: 'jqe8buWT8rsfBMYt8mpwSbnjy44WNy/5v1gN1JfFsNk='
+```
 
 If the user does not specify a key, the manager will use the key from the database. If there is no key in the manager's database, it will randomly generate one, use it, and save it.
 
 The manager will perform this work after initializing the database.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant Config as Config File
+    participant Manager
+    participant Database
+    participant Client
+
+    %% User config and Start
+    User->>Config: 1. Edit Config (may contain key)
+    User->>Manager: 2. Start Manager
+    activate Manager
+
+    %% Manager Initialization and Key Choice
+    Manager->>Config: 3. Read Config
+    
+    alt [Key found in Config]
+        Config-->>Manager: 3.1 Return Config (with key)
+        Manager->>Database: 4. Write the Key to Database
+        Note right of Manager: Use the Key in Config
+    
+    else [No Key in Config]
+        Config-->>Manager: 3.2 Return Config (without key)
+        Manager->>Database: 4. Query if Key Exsists in Database
+        activate Database
+
+        alt [Key Exsists in Database]
+            Database-->>Manager: 4.1 Return the Key in Database
+            Note right of Manager: Use the Key in Database
+        
+        else [Key not Exsists in Database]
+            Database-->>Manager: 4.2 Key not Found
+            Manager->>Manager: Generate a New Key Randomly
+            Manager->>Database: Write the Key to Database
+            Note right of Manager: Use the Key Generated
+        end
+        deactivate Database
+    end
+    
+    Note over Manager: Key Initialization Complete
+    deactivate Manager
+
+
+    %% 3. Client Start and Get Key
+    User->>Client: 5. Start Client
+    activate Client
+
+    Client->>Manager: 6. Request key
+    activate Manager
+    
+    Manager->>Database: Query
+    activate Database
+    Database-->>Manager: Return the Key
+    deactivate Database
+
+    Manager-->>Client: Respond with the Current Key
+    deactivate Manager
+    deactivate Client
+```
 
 The new RPC will be defined in `dragonfly-api`.
 
@@ -119,6 +206,34 @@ message RequestEncryptionKeyRequest {
 message RequestEncryptionKeyResponse {  
   // Encryption key provided by manager.  
   bytes encryption_key = 1;  
+}
+```
+
+```rust
+// dragonfly-api/src/manager.v2.rs
+/// RequestEncryptionKeyRequest represents request of RequestEncryptionKey.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RequestEncryptionKeyRequest {
+    /// Request source type.
+    #[prost(enumeration = "SourceType", tag = "1")]
+    pub source_type: i32,
+    /// Source service hostname.
+    #[prost(string, tag = "2")]
+    pub hostname: ::prost::alloc::string::String,
+    /// Source service ip.
+    #[prost(string, tag = "3")]
+    pub ip: ::prost::alloc::string::String,
+}
+/// RequestEncryptionKeyResponse represents response of RequestEncryptionKey.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RequestEncryptionKeyResponse {
+    /// Encryption key provided by manager.
+    #[prost(bytes = "vec", tag = "1")]
+    pub encryption_key: ::prost::alloc::vec::Vec<u8>,
 }
 ```
 
@@ -333,6 +448,5 @@ This design provides a foundation for adding P2P Peer Cache Encryption Storage t
 
 # TODO
 
-- [ ] Graph in Architecture
 - [ ] Normal `Task` Implementation
 
