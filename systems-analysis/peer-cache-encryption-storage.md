@@ -28,6 +28,8 @@ sequenceDiagram
     participant storage as Storage
     participant content as Content
 
+    %% Read
+    Note over storage: Read
     activate storage
     storage->>content: read_persistent_cache_piece()
 
@@ -37,6 +39,23 @@ sequenceDiagram
     else enable encryption
         content-->>storage: DecryptReader
     end
+
+    deactivate content
+    deactivate storage
+
+    %% Write
+    Note over storage: Write
+    activate storage
+    storage->>content: write_persistent_cache_piece(reader)
+
+    activate content
+    alt disable encryption(default)
+        content->>content: Copy Reader to File
+    else enable encryption
+        %% content->>content: DecryptReader
+        content->>content: Copy EncryptReader to File
+    end
+    content-->>storage: WritePieceResponse
 
     deactivate content
     deactivate storage
