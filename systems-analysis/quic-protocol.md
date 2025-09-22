@@ -42,7 +42,7 @@ dragonfly-client-storage/src/
 - `piece_downloader.rs`: Add QUIC support to DownloaderFactory
 - `dfdaemon/main.rs`: Add protocol configuration parsing
 - Configuration file: Add `storage.server.protocol` option
-  
+
 ## Implementation
 
 ### Client
@@ -92,46 +92,12 @@ impl StorageClient {
 }
 ```
 
-### Vortex Protocol 
+### Vortex Protocol
 
-The QUIC implementation will support Dragonfly's Vortex application-layer protocol:
+The QUIC implementation will support Dragonfly's Vortex protocol, refer to
+<https://github.com/dragonflyoss/vortex-protocol>.
 
-#### Message Format
-
-```
-+--------+--------+--------+--------+
-| ID     | Tag    | Length | Value  |
-| (1B)   | (1B)   | (4B)   | (var)  |
-+--------+--------+--------+--------+
-```
-
-#### Message Types
-
-- **Download Piece (Tag=0x00)**: Request piece content from peer
-- **Piece Content (Tag=0x01)**: Raw piece data or fragment
-- **Error (Tag=0xFF)**: Data transmission error
-- **Close (Tag=0xFE)**: Connection termination
-- **Reserved Tags (2-253)**: Future protocol extensions
-
-#### Encoding/Decoding Implementation
-
-```rust
-impl Vortex {
-    pub fn from_bytes(bytes: Bytes) -> Result<Self> {
-        // Parse header and validate packet structure
-        // Extract packet_id, tag, length, and value
-        // Return appropriate Vortex enum variant
-    }
-
-    pub fn to_bytes(&self) -> Bytes {
-        // Serialize packet to byte format
-        // Construct header with packet_id, tag, length
-        // Append value bytes
-    }
-}
-```
-
-### QUIC Downloader 
+### QUIC Downloader
 
 ```rust
 pub struct QUICDownloader {
@@ -165,94 +131,25 @@ impl Downloader for QUICDownloader {
 }
 ```
 
-### Performance 
+### Performance
 
-#### Zero-Copy
-
-Using `sendfile` for efficient data transfer:
-
-```rust
-/// read_piece reads the piece from the content.
-    #[instrument(skip_all)]
-    pub async fn read_piece(
-        &self,
-        socket_fd: c_int,
-        task_id: &str,
-        offset: u64,
-        length: u64,
-        range: Option<Range>,
-    ) {
-        let task_path = self.get_task_path(task_id);
-
-        // Calculate the target offset and length based on the range.
-        let (target_offset, target_length) = calculate_piece_range(offset, length, range);
-
-        let f = File::open(task_path.as_path()).await.inspect_err(|err| {
-            error!("open {:?} failed: {}", task_path, err);
-        })?;
-
-        // Original Implementation
-        // let mut f_reader = BufReader::with_capacity(self.config.storage.read_buffer_size, f);
-        // f_reader
-        //     .seek(SeekFrom::Start(target_offset))
-        //     .await
-        //     .inspect_err(|err| {
-        //         error!("seek {:?} failed: {}", task_path, err);
-        //     })?;
-        // Ok(f_reader.take(target_length))
-
-        //Sendfile Implementation
-        task::spawn_blocking(move || {
-            unsafe {
-                libc::sendfile(socket_fd, f, target_offset, target_length)
-            }
-        }).await?;
-    }
-```
-
-#### Quinn Configuration
-
-Using `quinn` for efficient data transfer:
-
-##### Server
-
-```rust
-let mut server_config = quinn::ServerConfig::with_single_cert(cert_chain, key)?;
-server_config.transport = optimized_quinn_transport_config();
-let endpoint = quinn::Endpoint::server(server_config, listen_addr)?;
-```
-##### Client
-
-```rust
-let mut client_config = quinn::ClientConfig::default();
-client_config.transport_config(optimized_quinn_transport_config());
-let mut endpoint = quinn::Endpoint::client("[::]:0".parse().unwrap())?;
-endpoint.set_default_client_config(client_config);
-```
-
-#### Quinn Parameters
-
-- **Flow Control**: Each connection supports multiple concurrent streams, dynamically adjust flow control window size and multiplex multiple data streams on a single connection
-- **Connection Management**: Avoid the overhead of frequently establishing and destroying connections
- , automatically clean up idle connections,prevent resource exhaustion from too many connections
-- **Congestion Control**: BBR algorithm and cubic for high-bandwidth networks 
-- **0-RTT**: Enable 0-RTT to reduce connection establishment time
+TODO
 
 ### Configuration
 
 Add QUIC protocol configuration to `dfdaemon.yaml`:
 
 ```yaml
+download:
+  protocol: quic
+
 storage:
   server:
-    quic:
-      port: 4006
-      buffer_size: 4194304
-      idle_timeout: 300s
-      max_connections: 1000
+    ip: 0.0.0.0
+    quic_port: 4005
 ```
 
-## Testing 
+## Testing
 
 1. **Unit Tests**: Individual component testing with 85%+ coverage
 2. **Integration Tests**: End-to-end functionality verification
