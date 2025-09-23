@@ -75,42 +75,8 @@ pub trait Client: Send + Sync {
 
 ### Vortex Protocol
 
-The TCP implementation will support Dragonfly's Vortex application-layer protocol:
-
-#### Message Format
-
-```
-+--------+--------+--------+--------+
-| ID     | Tag    | Length | Value  |
-| (1B)   | (1B)   | (4B)   | (var)  |
-+--------+--------+--------+--------+
-```
-
-#### Message Types
-
-- **Download Piece (Tag=0x00)**: Request piece content from peer
-- **Piece Content (Tag=0x01)**: Raw piece data or fragment
-- **Error (Tag=0xFF)**: Data transmission error
-- **Close (Tag=0xFE)**: Connection termination
-- **Reserved Tags (2-253)**: Future protocol extensions
-
-#### Encoding/Decoding Implementation
-
-```rust
-impl Vortex {
-    pub fn from_bytes(bytes: Bytes) -> Result<Self> {
-        // Parse header and validate packet structure
-        // Extract packet_id, tag, length, and value
-        // Return appropriate Vortex enum variant
-    }
-
-    pub fn to_bytes(&self) -> Bytes {
-        // Serialize packet to byte format
-        // Construct header with packet_id, tag, length
-        // Append value bytes
-    }
-}
-```
+The TCP implementation will support Dragonfly's Vortex protocol, refer to
+<https://github.com/dragonflyoss/vortex-protocol>.
 
 ### TCP Downloader
 
@@ -146,71 +112,34 @@ impl Downloader for TCPDownloader {
 }
 ```
 
-### Performance
-
-#### Zero-Copy
-
-Using `sendfile` for efficient data transfer:
-
-```rust
-/// read_piece reads the piece from the content.
-    #[instrument(skip_all)]
-    pub async fn read_piece(
-        &self,
-        socket_fd: c_int,
-        task_id: &str,
-        offset: u64,
-        length: u64,
-        range: Option<Range>,
-    ) {
-        let task_path = self.get_task_path(task_id);
-
-        // Calculate the target offset and length based on the range.
-        let (target_offset, target_length) = calculate_piece_range(offset, length, range);
-
-        let f = File::open(task_path.as_path()).await.inspect_err(|err| {
-            error!("open {:?} failed: {}", task_path, err);
-        })?;
-
-        // Original Implementation
-        // let mut f_reader = BufReader::with_capacity(self.config.storage.read_buffer_size, f);
-        // f_reader
-        //     .seek(SeekFrom::Start(target_offset))
-        //     .await
-        //     .inspect_err(|err| {
-        //         error!("seek {:?} failed: {}", task_path, err);
-        //     })?;
-        // Ok(f_reader.take(target_length))
-
-        //Sendfile Implementation
-        task::spawn_blocking(move || {
-            unsafe {
-                libc::sendfile(socket_fd, f, target_offset, target_length)
-            }
-        }).await?;
-    }
-```
-
-#### TCP Parameters
-
-- **Buffer Sizes**: Optimize SO_RCVBUF and SO_SNDBUF
-- **TCP Options**: TCP_NODELAY, TCP_CORK, TCP_KEEPALIVE
-- **Congestion Control**: BBR algorithm for high-bandwidth networks
-- **Connection Management**: Connection pooling with idle timeout
-
 ### Configuration
 
 Add TCP protocol configuration to `dfdaemon.yaml`:
 
 ```yaml
+download:
+  protocol: tcp
+
 storage:
   server:
-    tcp:
-      port: 4005
-      buffer_size: 4194304
-      idle_timeout: 300s
-      max_connections: 1000
+    ip: 0.0.0.0
+    tcp_port: 4005
 ```
+
+### Performance
+
+<!-- markdownlint-disable -->
+
+| Protocol    | File Size | Download Time from Parent Peer | CPU/MEM | Piece Concurrency | Peak Memory                                                         | Parent Node Peak Memory                                             |
+| ----------- | --------- | ------------------------------ | ------- | ----------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| GRPC        | 30G       | 40.001s                        | 16C32G  | 32                | Peak Virtual Memory: 3431448 kB<br>Peak Resident Memory: 1488304 kB | Peak Virtual Memory: 8566600 kB<br>Peak Resident Memory: 2904044 kB |
+| Vortex(TCP) | 30G       | 20.626s                        | 16C32G  | 32                | Peak Virtual Memory: 1807452 kB<br>Peak Resident Memory: 505224 kB  | Peak Virtual Memory: 2193628 kB<br>Peak Resident Memory: 551880 kB  |
+| GRPC        | 10G       | 12.543s                        | 16C32G  | 32                | Peak Virtual Memory: 2741832 kB<br>Peak Resident Memory: 1144044 kB | Peak Virtual Memory: 4615284 kB<br>Peak Resident Memory: 1499472 kB |
+| Vortex(TCP) | 10G       | 6.726s                         | 16C32G  | 32                | Peak Virtual Memory: 1717836 kB<br>Peak Resident Memory: 477832 kB  | Peak Virtual Memory: 2125780 kB<br>Peak Resident Memory: 539084 kB  |
+| GRPC        | 1G        | 1.651s                         | 16C32G  | 32                | Peak Virtual Memory: 1258904 kB<br>Peak Resident Memory: 423784 kB  | Peak Virtual Memory: 2032088 kB<br>Peak Resident Memory: 520656 kB  |
+| Vortex(TCP) | 1G        | 1.562s                         | 16C32G  | 32                | Peak Virtual Memory: 1076620 kB<br>Peak Resident Memory: 221824 kB  | Peak Virtual Memory: 1917932 kB<br>Peak Resident Memory: 476512 kB  |
+
+<!-- markdownlint-restore -->
 
 ## Testing
 
