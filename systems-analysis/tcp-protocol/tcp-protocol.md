@@ -128,16 +128,26 @@ storage:
 
 ### Performance
 
+The congestion control algorithm used Bottleneck Bandwidth and Round-trip propagation time(BBR) for TCP protocols.
+
 <!-- markdownlint-disable -->
 
-| Protocol    | File Size | Download Time from Parent Peer | CPU/MEM | Piece Concurrency | Peak Memory                                                         | Parent Node Peak Memory                                             |
-| ----------- | --------- | ------------------------------ | ------- | ----------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| GRPC        | 30G       | 40.001s                        | 16C32G  | 32                | Peak Virtual Memory: 3431448 kB<br>Peak Resident Memory: 1488304 kB | Peak Virtual Memory: 8566600 kB<br>Peak Resident Memory: 2904044 kB |
-| Vortex(TCP) | 30G       | 20.626s                        | 16C32G  | 32                | Peak Virtual Memory: 1807452 kB<br>Peak Resident Memory: 505224 kB  | Peak Virtual Memory: 2193628 kB<br>Peak Resident Memory: 551880 kB  |
-| GRPC        | 10G       | 12.543s                        | 16C32G  | 32                | Peak Virtual Memory: 2741832 kB<br>Peak Resident Memory: 1144044 kB | Peak Virtual Memory: 4615284 kB<br>Peak Resident Memory: 1499472 kB |
-| Vortex(TCP) | 10G       | 6.726s                         | 16C32G  | 32                | Peak Virtual Memory: 1717836 kB<br>Peak Resident Memory: 477832 kB  | Peak Virtual Memory: 2125780 kB<br>Peak Resident Memory: 539084 kB  |
-| GRPC        | 1G        | 1.651s                         | 16C32G  | 32                | Peak Virtual Memory: 1258904 kB<br>Peak Resident Memory: 423784 kB  | Peak Virtual Memory: 2032088 kB<br>Peak Resident Memory: 520656 kB  |
-| Vortex(TCP) | 1G        | 1.562s                         | 16C32G  | 32                | Peak Virtual Memory: 1076620 kB<br>Peak Resident Memory: 221824 kB  | Peak Virtual Memory: 1917932 kB<br>Peak Resident Memory: 476512 kB  |
+| Protocol    | File Size | Download Time from Parent Peer | CPU/MEM | Piece Concurrency | Peak Memory                                                         | Parent Peer Peak Memory                                              |
+| ----------- | --------- | ------------------------------ | ------- | ----------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| GRPC        | 30G       | 40.001s                        | 16C32G  | 32                | Peak Virtual Memory: 5236392 kB<br>Peak Resident Memory: 2151256 kB | Peak Virtual Memory: 12174728 kB<br>Peak Resident Memory: 5206904 kB |
+| Vortex(TCP) | 30G       | 20.626s                        | 16C32G  | 32                | Peak Virtual Memory: 2435020 kB<br>Peak Resident Memory: 561364 kB  | Peak Virtual Memory: 2835012 kB<br>Peak Resident Memory: 728256 kB   |
+| GRPC        | 10G       | 12.543s                        | 16C32G  | 32                | Peak Virtual Memory: 3731144 kB<br>Peak Resident Memory: 1506620 kB | Peak Virtual Memory: 7200984 kB<br>Peak Resident Memory: 2338528 kB  |
+| Vortex(TCP) | 10G       | 6.726s                         | 16C32G  | 32                | Peak Virtual Memory: 2544092 kB<br>Peak Resident Memory: 675212 kB  | Peak Virtual Memory: 2707524 kB<br>Peak Resident Memory: 726016 kB   |
+| GRPC        | 1G        | 1.651s                         | 16C32G  | 32                | Peak Virtual Memory: 1257368 kB<br>Peak Resident Memory: 425688 kB  | Peak Virtual Memory: 2663160 kB<br>Peak Resident Memory: 660344 kB   |
+| Vortex(TCP) | 1G        | 1.562s                         | 16C32G  | 32                | Peak Virtual Memory: 1164812 kB<br>Peak Resident Memory: 231308 kB  | Peak Virtual Memory: 2699596 kB<br>Peak Resident Memory: 688820 kB   |
+
+#### Download Time from Parent Peer
+
+![Download Time from Parent Peer](./download-time.png)
+
+#### Peak Parent Peer Resident Memory
+
+![Peak Parent Peer Resident Memory](./parent-memory.png)
 
 <!-- markdownlint-restore -->
 

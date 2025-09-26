@@ -133,7 +133,28 @@ impl Downloader for QUICDownloader {
 
 ### Performance
 
-TODO
+The congestion control algorithm used Bottleneck Bandwidth and Round-trip propagation time(BBR) for QUIC protocols.
+
+<!-- markdownlint-disable -->
+
+| Protocol     | File Size | Download Time from Parent Peer | CPU/MEM | Piece Concurrency | Peak Memory                                                         | Parent Peer Peak Memory                                              |
+| ------------ | --------- | ------------------------------ | ------- | ----------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| GRPC         | 30G       | 40.001s                        | 16C32G  | 32                | Peak Virtual Memory: 5236392 kB<br>Peak Resident Memory: 2151256 kB | Peak Virtual Memory: 12174728 kB<br>Peak Resident Memory: 5206904 kB |
+| Vortex(QUIC) | 30G       | 28.214s                        | 16C32G  | 32                | Peak Virtual Memory: 3021500 kB<br>Peak Resident Memory: 1047568 kB | Peak Virtual Memory: 3002448 kB<br>Peak Resident Memory: 749596 kB   |
+| GRPC         | 10G       | 12.543s                        | 16C32G  | 32                | Peak Virtual Memory: 3731144 kB<br>Peak Resident Memory: 1506620 kB | Peak Virtual Memory: 7200984 kB<br>Peak Resident Memory: 2338528 kB  |
+| Vortex(QUIC) | 10G       | 9.950s                         | 16C32G  | 32                | Peak Virtual Memory: 2745432 kB<br>Peak Resident Memory: 971068 kB  | Peak Virtual Memory: 2987628 kB<br>Peak Resident Memory: 783688 kB   |
+| GRPC         | 1G        | 1.651s                         | 16C32G  | 32                | Peak Virtual Memory: 1257368 kB<br>Peak Resident Memory: 425688 kB  | Peak Virtual Memory: 2663160 kB<br>Peak Resident Memory: 660344 kB   |
+| Vortex(QUIC) | 1G        | 1.806s                         | 16C32G  | 32                | Peak Virtual Memory: 2595516 kB<br>Peak Resident Memory: 294344 kB  | Peak Virtual Memory: 2744732 kB<br>Peak Resident Memory: 715704 kB   |
+
+#### Download Time from Parent Peer
+
+![Download Time from Parent Peer](./download-time.png)
+
+#### Peak Parent Peer Resident Memory
+
+![Peak Parent Peer Resident Memory](./parent-memory.png)
+
+<!-- markdownlint-restore -->
 
 ### Configuration
 
