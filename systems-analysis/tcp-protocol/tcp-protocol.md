@@ -2,7 +2,10 @@
 
 ## Overview
 
-This design document proposes adding TCP protocol support to Dragonfly's P2P file transfer mechanism. Currently, Dragonfly only supports gRPC protocol for peer-to-peer communication. Adding TCP support will provide a more lightweight transport option that may offer better performance in certain network environments.
+This design document proposes adding support for the TCP protocol to peer-to-peer (P2P) file-transfer subsystem.
+Dragonfly currently relies on gRPC (HTTP/2 over TCP) for P2P communication.
+Introducing TCP would provide a lighter-weight, UDP-based transport with improved multiplexing and reduced head-of-line blocking,
+which can deliver better throughput and lower latency in high-bandwidth, low-RTT or local-area network (LAN).
 
 ## Motivation
 
@@ -123,21 +126,22 @@ download:
 storage:
   server:
     ip: 0.0.0.0
-    tcp_port: 4005
+    tcpPort: 4005
 ```
 
 ### Performance
 
-The congestion control algorithm used Bottleneck Bandwidth and Round-trip propagation time(BBR) for TCP protocols.
+The test environment is a local area network with RTT less than 10ms,
+using the [CUBIC](https://en.wikipedia.org/wiki/CUBIC_TCP) congestion control algorithm for TCP protocols.
 
 <!-- markdownlint-disable -->
 
 | Protocol    | File Size | Download Time from Parent Peer | CPU/MEM | Piece Concurrency | Peak Memory                                                         | Parent Peer Peak Memory                                              |
 | ----------- | --------- | ------------------------------ | ------- | ----------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------- |
 | GRPC        | 30G       | 40.001s                        | 16C32G  | 32                | Peak Virtual Memory: 5236392 kB<br>Peak Resident Memory: 2151256 kB | Peak Virtual Memory: 12174728 kB<br>Peak Resident Memory: 5206904 kB |
-| Vortex(TCP) | 30G       | 20.626s                        | 16C32G  | 32                | Peak Virtual Memory: 2435020 kB<br>Peak Resident Memory: 561364 kB  | Peak Virtual Memory: 2835012 kB<br>Peak Resident Memory: 728256 kB   |
+| Vortex(TCP) | 30G       | 19.869s                        | 16C32G  | 32                | Peak Virtual Memory: 2435020 kB<br>Peak Resident Memory: 561364 kB  | Peak Virtual Memory: 2835012 kB<br>Peak Resident Memory: 728256 kB   |
 | GRPC        | 10G       | 12.543s                        | 16C32G  | 32                | Peak Virtual Memory: 3731144 kB<br>Peak Resident Memory: 1506620 kB | Peak Virtual Memory: 7200984 kB<br>Peak Resident Memory: 2338528 kB  |
-| Vortex(TCP) | 10G       | 6.726s                         | 16C32G  | 32                | Peak Virtual Memory: 2544092 kB<br>Peak Resident Memory: 675212 kB  | Peak Virtual Memory: 2707524 kB<br>Peak Resident Memory: 726016 kB   |
+| Vortex(TCP) | 10G       | 6.542s                         | 16C32G  | 32                | Peak Virtual Memory: 2544092 kB<br>Peak Resident Memory: 675212 kB  | Peak Virtual Memory: 2707524 kB<br>Peak Resident Memory: 726016 kB   |
 | GRPC        | 1G        | 1.651s                         | 16C32G  | 32                | Peak Virtual Memory: 1257368 kB<br>Peak Resident Memory: 425688 kB  | Peak Virtual Memory: 2663160 kB<br>Peak Resident Memory: 660344 kB   |
 | Vortex(TCP) | 1G        | 1.562s                         | 16C32G  | 32                | Peak Virtual Memory: 1164812 kB<br>Peak Resident Memory: 231308 kB  | Peak Virtual Memory: 2699596 kB<br>Peak Resident Memory: 688820 kB   |
 

@@ -2,7 +2,10 @@
 
 ## Overview
 
-This design document proposes adding QUIC protocol support to Dragonfly's P2P file transfer mechanism. Currently, Dragonfly only supports gRPC protocol for peer-to-peer communication. Adding QUIC support will provide a more lightweight transport option that may offer better performance in certain network environments.
+This design document proposes adding support for the QUIC protocol to peer-to-peer (P2P) file-transfer subsystem.
+Dragonfly currently relies on gRPC (HTTP/2 over TCP) for P2P communication.
+Introducing QUIC would provide a lighter-weight, UDP-based transport with improved multiplexing and reduced head-of-line blocking,
+which can deliver better throughput and lower latency in high-bandwidth, long-RTT, or lossy networks.
 
 ## Motivation
 
@@ -133,7 +136,8 @@ impl Downloader for QUICDownloader {
 
 ### Performance
 
-The congestion control algorithm used Bottleneck Bandwidth and Round-trip propagation time(BBR) for QUIC protocols.
+The test environment is a local area network with RTT less than 10ms,
+using the Bottleneck Bandwidth and Round-trip propagation time(BBR) congestion control algorithm for QUIC protocols.
 
 <!-- markdownlint-disable -->
 
@@ -167,7 +171,7 @@ download:
 storage:
   server:
     ip: 0.0.0.0
-    quic_port: 4005
+    quicPort: 4005
 ```
 
 ## Testing
