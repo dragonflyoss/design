@@ -30,49 +30,36 @@ This document proposes the design of a Kubernetes Mutating Admission Webhook int
 
 ```mermaid
 graph LR
-    B(Server starts)
-    B --> C(Webhook request listening)
-    C --> D{Whether there is a specific annotation}
-    D -->|Yes| E(InjectorManager)
-    D -->|No| F(Do not process)
-    E --> E1(P2P proxy environment variable injection)
-    E --> E2(dfdaemon Socket volume mounting)
-    E --> E3(cli tool injection)
-    E1 --> H(Patch Generator)
-    E2 --> H
-    E3 --> H
-    H --> K(Modify Pod definition)
+    A[Pod Creation] --> B[Pod Webhook]
+    B --> C{Check Conditions}
+    C -->|Meet| D[ConfigManager]
+    C -->|Not Meet| E[Skip]
+    D --> F[Injector Chain]
+    F --> G[Environment Variables]
+    F --> H[Unix Socket]
+    F --> I[CLI Tools]
+    G --> J[Modify Pod]
+    H --> J
+    I --> J
+    J --> K[Return Pod]
 ```
 
 ## Modules
 
 ```bash
-dragonfly-inject-p2p/
+dragonfly-injector/
 ├── cmd/
-│   └── main.go             # Entry point
-├── deploy/
-├── internal/
-│   ├── config/
-│   │   └── config.go       # Configuration management
-│   ├── server/
-│   │   └── server.go       # HTTP server
-│   ├── handler/
-│   │   └── handler.go      # Webhook request handling
-│   ├── injector/
-│   │   ├── manager/
-│   │   │   └── manager.go  # Injection manager
-│   │   ├── resource/
-│   │   │   ├── proxy_injector.go   # P2P proxy injector
-│   │   │   ├── socket_injector.go  # dfdaemon Socket volume mount injector
-│   │   │   └── cli_injector.go     # cli tool injector
-│   │   └── patch/
-│   │       └── patch.go            # JSON Patch
-│   └── util/
-│       └── util.go         # Utility functions
-├── scripts/                # Helper scripts
-└── test/                   # Test code
-    ├── unit/
-    └── e2e/
+│   └── main.go                    # Entry point with manager and webhook server setup
+├── internal/webhook/v1
+│   ├── injector
+│   │   ├── config.go     # Configuration management and constants
+│   │   ├── proxy_env.go  # P2P proxy environment variable injection
+│   │   ├── tools_initcontainer.go  # CLI tools init container injection
+│   │   └── unix_socket.go  # dfdaemon Unix socket volume mounting
+│   └── pod_webhook.go  # Pod webhook implementation with injection logic
+├── config/   # Kubernetes manifests and configurations
+├── dist/
+└── test/     # Test files
 ```
 
 ## Implementation
@@ -80,99 +67,56 @@ dragonfly-inject-p2p/
 ### Config
 
 ```go
-type Config struct {
-    /* Some webhook server config*/
-
-    //...
-
-    /* Webhook Config*/
-    // Proxy port for constructing P2P proxy environment variables
-    ProxyPort string
-    // Path to the dfdaemon socket file on the node for volume mounting
-    DfdaemonSocketPath string
-    // Version of the init container image containing the cli tool
-    InitConatinerVersion string
-    // Name of the shared volume for cli tool injection
-    SharedVolumeName string
-    // Mount path of the shared volume inside containers for cli access
-    SharedVolumeMountPath string
-    // Path to the cli tool within the init container
-    InitContainerPath string
-    // Annotation name to trigger the Webhook injection
-    AnnotationName string
+type InjectConf struct {
+	Enable          bool   `yaml:"enable" json:"enable"`         // Whether to enable dragonfly injection
+	ProxyPort       int    `yaml:"proxy_port" json:"proxy_port"` // Proxy port of dragonfly proxy(dfdaemon proxy port)
+	CliToolsImage   string `yaml:"cli_tools_image" json:"cli_tools_image"`
+	CliToolsDirPath string `yaml:"cli_tools_dir_path" json:"cli_tools_dir_path"`
 }
 ```
 
 ### Server
 
 ```go
-type Server struct {
-    /* Server config suach as IP and port*/
-
-    //...
-
-    handler Handler
+type PodCustomDefaulter struct {
+	configManager *injector.ConfigManager
+	kubeClient    client.Client
+	injectors     []Injector
 }
 
-func (s *Server) Start() {
-    http.HandleFunc("/mutate", s.handler.HandleWebhook)
-}
-```
-
-### Handler
-
-```go
-type Handler struct {
-    injectorManager InjectorManager
-}
-
-func (h *Handler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
-    // parse pod from request
-    // ...
-    if /* pod has specific annotation*/ {
-        mutatedPod := h.injectorManager.Inject(pod)
-        patch := patch.GeneratePatch(pod, mutatedPod)
-        /* send patch pod */
-    } else {
-        /* send Original pod */
-    }
-}
-```
-
-### InjectorManager
-
-```go
-type Injector interface {
-    Inject(pod *corev1.Pod) *corev1.Pod
-}
-```
-
-```go
-type InjectorManager struct {
-    config Config
-    injectors []Injector
-}
-
-func (im *InjectorManager) Inject(pod *corev1.Pod) *corev1.Pod {
-    for _, injector := range im.injectors {
-        pod = injector.Inject(pod)
-    }
-    return pod
+func (d *PodCustomDefaulter) applyDefaults(ctx context.Context, pod *corev1.Pod) {
+	config := d.configManager.GetConfig()
+	if config == nil || !config.Enable {
+		podlog.Info("Config disabled, skip inject", "name", pod.GetName())
+		return
+	}
+	// check if need inject
+	if !d.injectRequired(ctx, pod) {
+		podlog.Info("Pod not inject", "name", pod.GetName())
+		return
+	}
+	podlog.Info("Pod inject ")
+	for _, ij := range d.injectors {
+		ij.Inject(pod, config)
+	}
 }
 ```
 
 ### Injector
 
 ```go
-type ProxyInjector struct {
+type Injector interface {
+	Inject(pod *corev1.Pod, config *injector.InjectConf)
+}
+
+type ProxyEnvInjector struct {
     // proxyInjector config
     // such as proxy env ...
 }
 
-func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
+func (pei *ProxyEnvInjector) Inject(pod *corev1.Pod, config *injector.InjectConf) {
     // inject proxy env
     // ...
-    return mutatedPod
 }
 
 // SocketInjector
@@ -185,7 +129,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
 ## Webhook Details
 
 1. **Annotation(label)-based Injection Scope**:
-   The webhook supports injecting P2P configurations based on annotations(labels) at both the namespace and pod levels. By adding a specific label to a namespace, all pods within that namespace will have the P2P capabilities automatically injected. Additionally, pods can be annotated to enable or customize the injection. The priority of annotations is as follows: `pod-level annotations` > `namespace-level labels` > `webhook default config`.
+   The webhook supports injecting P2P configurations based on annotations(labels) at both the namespace and pod levels. By adding a specific label to a namespace, all pods within that namespace will have the P2P capabilities automatically injected. Additionally, pods can be annotated to enable or customize the injection. The priority of annotations is as follows: `pod-level annotations` > `namespace-level labels`.
 
    - Namespace injection:
 
@@ -194,7 +138,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
      kind: Namespace
      metadata:
        labels:
-         dragonflyoss-injection: enabled
+         dragonfly.io/inject: "true"
        name: test-namespace
      ```
 
@@ -207,7 +151,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
        name: test-pod
        namespace: test-namespace
        annotations:
-         dragonfly.io/inject: 'true'
+         dragonfly.io/inject: "true"
      spec:
        containers:
          - image: test-pod-image
@@ -223,7 +167,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
    metadata:
      name: test-pod
      annotations:
-       dragonfly.io/inject: 'true' # webhook listens for this annotation
+       dragonfly.io/inject: "true" # webhook listens for this annotation
    spec:
      containers:
        - name: test-pod-cotainer
@@ -234,9 +178,9 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
                fieldRef:
                  fieldPath: spec.nodeName
            - name: DRAGONFLY_PROXY_PORT # Port value obtained from Helm Chart
-             value: '8001' # Assume the Helm Chart sets the port to 8001
+             value: "8001" # Assume the Helm Chart sets the port to 8001
            - name: DRAGONFLY_INJECT_PROXY # Concatenated proxy address
-             value: 'http://$(NODE_NAME):$(DRAGONFLY_PROXY_PORT)'
+             value: "http://$(NODE_NAME):$(DRAGONFLY_PROXY_PORT)"
    ```
 
 3. **dfdaemon Socket Volume Mounting**:
@@ -248,7 +192,7 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
    metadata:
      name: test-app-with-dfdaemon-socket
      annotations:
-       dragonfly.io/inject: 'true' # Annotation to trigger the Webhook
+       dragonfly.io/inject: "true" # Annotation to trigger the Webhook
    spec:
      containers:
        - name: test-app-container
@@ -264,19 +208,19 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
    ```
 
 4. **Cli Tool Injection**:
-   Considering that many base container images do not include the cli tool (such as `dfget`), and manual installation is inconvenient, this project will solve this problem using an Init Container. The Webhook will automatically add an initContainer to the target Pod. This initContainer is a custom lightweight image available in both amd64 and arm64 architectures, each containing the corresponding architecture's cli tool. The Webhook will also copy the cli tool from this initContainer to a shared volume. Subsequently, the Webhook modifies the `PATH` environment variable of the application container to add the shared volume directory where cli is located, allowing the application container to execute cli commands directly from the command line without additional user installation or specifying the full path.
+   Considering that many base container images do not include the cli tool (such as `dfget`), and manual installation is inconvenient, this project will solve this problem using an Init Container. The Webhook will automatically add an initContainer to the target Pod. This initContainer is a custom lightweight image available in both amd64 and arm64 architectures, each containing the corresponding architecture's cli tool. The Webhook will also copy the cli tool from this initContainer to a shared volume. Subsequently, the Webhook add the `DRAGONFLY_TOOLS_PATH` environment variable of the application container to add the shared volume directory where cli is located, allowing the application container to execute cli commands directly from the command line without additional user installation or specifying the full path.
 
    The InitContainer uses Docker's manifest list to achieve the function of automatically importing the corresponding architecture initContainer, and its build commands are as follows:
 
    ```bash
    # Create manifest
-   docker manifest create dragonflyoss/cli-tools:latest \
-   dragonflyoss/cli-tools-amd64-linux:latest \
-   dragonflyoss/cli-tools-arm64-linux:latest
+   docker manifest create dragonflyoss/toolkits:latest \
+   dragonflyoss/toolkits-amd64-linux:latest \
+   dragonflyoss/toolkits-arm64-linux:latest
 
-   docker manifest annotate dragonflyoss/cli-tools-amd64-linux:latest --arch amd64 --os linux
-   docker manifest annotate dragonflyoss/cli-tools-arm64-linux:latest --arch arm64 --os linux
-   docker manifest push dragonflyoss/cli-tools:latest
+   docker manifest annotate dragonflyoss/toolkits-amd64-linux:latest --arch amd64 --os linux
+   docker manifest annotate dragonflyoss/toolkits-arm64-linux:latest --arch arm64 --os linux
+   docker manifest push dragonflyoss/toolkits:latest
    ```
 
    Sample yaml for the injected pod:
@@ -287,25 +231,49 @@ func (pi *ProxyInjector) Inject(pod *corev1.Pod) *corev1.Pod {
    metadata:
      name: test-app-with-cli-tools-image
      annotations:
-       dragonfly.io/inject: 'true' # Annotation to trigger the Webhook
+       dragonfly.io/inject: "true" # Annotation to trigger the Webhook
        # The image and version fields only need to be added if you want to specify non-default values.
-       dragonfly.io/cli-tools-image: 'dragonflyoss/cli-tools:v0.0.1'
+       dragonfly.io/cli-tools-image: "dragonflyoss/toolkits:v0.0.1"
    spec:
-     initContainers: # Injected by the webhook
-       - name: cli-tools
-         image: dragonflyoss/cli-tools:v0.0.1
-         volumeMounts:
-           - name: dragonfly-tools-volume
-             mountPath: /dragonfly-tools
-     containers:
-       - name: test-app-container
-         image: test-app-image:latest
-         env:
-           - name: PATH
-             value: '/dragonfly-tools:$(PATH)' # Add to the PATH environment variable
-         volumeMounts:
-           - name: dragonfly-tools-volume
-             mountPath: /dragonfly-tools
+    containers:
+    - command:
+      - sh
+      - -c
+      - sleep 3600
+      env:
+      - name: NODE_NAME
+        valueFrom:
+          fieldRef:
+            apiVersion: v1
+            fieldPath: spec.nodeName
+      - name: DRAGONFLY_PROXY_PORT
+        value: "4001"
+      - name: DRAGONFLY_INJECT_PROXY
+        value: http://$(NODE_NAME):$(DRAGONFLY_PROXY_PORT)
+      - name: DRAGONFLY_TOOLS_PATH
+        value: /dragonfly-tools-mount
+      image: busybox:latest
+    initContainers:
+    - command:
+      - cp
+      - -rf
+      - /dragonfly-tools/.
+      - /dragonfly-tools-mount/
+      image: dragonflyoss/toolkits:latest
+      imagePullPolicy: IfNotPresent
+      name: d7y-cli-tools
+      volumeMounts:
+      - mountPath: /dragonfly-tools-mount
+        name: d7y-cli-tools-volume
+       containers:
+         - name: test-app-container
+           image: test-app-image:latest
+           env:
+             - name: DRAGONFLY_TOOLS_PATH
+               value: "/dragonfly-tools-mount"
+           volumeMounts:
+             - name: dragonfly-tools-volume
+               mountPath: /dragonfly-tools-mount
      volumes:
        - name: dragonfly-tools-volume
          emptyDir: {}
