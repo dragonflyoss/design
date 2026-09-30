@@ -124,14 +124,17 @@ pub struct UploadTraceTaskChunkGroup {
 pub enum TraceTaskCompressor { None, Zstd, Lz4Block }   // "none" | "zstd" | "lz4"
 ```
 
-| Field                                | Meaning                                                                     |
-| ------------------------------------ | --------------------------------------------------------------------------- |
-| `url`, `header`                      | The request dfdaemon uses to download the blob                              |
-| `compressor`                         | The blob's chunk group compressor, same set as nydus `BlobMetadataCompressor` |
-| `compressed_offset`, `compressed_size` | The group's bytes in the blob                                             |
-| `uncompressed_size`                  | Decoded length; an LZ4 block has no frame header and needs it               |
-| `is_uncompressed`                    | The group is stored plain; nydus skips compression that does not shrink     |
-| `source_blob_index`, `source_chunk_group_index` | Copied into the entry table in body order                        |
+| Field                      | Meaning                                                                   |
+| -------------------------- | ------------------------------------------------------------------------- |
+| `source_blob_index`        | The blob's index in the bootstrap device table, copied into the entry table |
+| `url`                      | The blob URL dfdaemon downloads from                                      |
+| `header`                   | The request headers for that download                                     |
+| `compressor`               | The blob's chunk group compressor, same set as nydus `BlobMetadataCompressor` |
+| `source_chunk_group_index` | The group's index in the blob's ChunkGroupTable, copied into the entry table |
+| `compressed_offset`        | Where the group's bytes start in the blob                                 |
+| `compressed_size`          | How many bytes the group occupies in the blob                             |
+| `uncompressed_size`        | The decoded length; an LZ4 block has no frame header and needs it         |
+| `is_uncompressed`          | The group is stored plain; nydus skips compression that does not shrink   |
 
 The upload is idempotent on `id`: the first upload wins until the task is evicted, a repeated `PUT` returns the
 current state.
@@ -282,7 +285,7 @@ async fn build(id, blobs, dynconfig, remote_ip);
 4. `tokio::spawn(build)`, return `Accepted`.
 
 No network I/O before the response. A building row always belongs to a live `build`; rows left by a crash are
-deleted at startup, so no timeout is needed.
+deleted when dfdaemon starts, so no timeout is needed.
 
 #### Build
 
@@ -309,7 +312,7 @@ deleted at startup, so no timeout is needed.
 #### Download
 
 1. `get_trace_task(id)`; anything but finished → `404`.
-2. `parse_range_header(value, content_length)`; failure → `416`.
+2. If `Range` is present, `parse_range_header(value, content_length)`; failure → `416`.
 3. `upload_trace_task(id, range)` → `RangeReader`.
 4. `200` / `206` headers, then `send_reader`, shared with the proxy send loop.
 
@@ -336,7 +339,6 @@ The body is read through `Limited`. Decoding uses `zstd` and `lz4_flex`, the cra
 | -------------------------------- | ------------------------------------------------------------------------------------------- |
 | `evict_trace_task_by_ttl`        | `is_expired(gc.policy.task_ttl)` and not uploading                                          |
 | `evict_trace_task_by_disk_usage` | Above the high watermark, evict finished tasks by `updated_at` to the low watermark, before tasks |
-| Startup                          | Delete unfinished rows and their files                                                      |
 
 ### Metrics
 
@@ -368,6 +370,6 @@ All `Range` reads of one replay go to the same replica. The Go module implements
 1. After mount, record chunk groups read on demand in first-access order, grouped by blob with its `url`,
    request `header` and `compressor`.
 2. `put_trace_task` once, after 10 s without an on-demand read or 5 min after mount, whichever comes first.
-3. On the next mount, `GET` and parse the header and the entry table, compute offsets from the source blob.meta, skip
-   cached groups, fetch the rest by `Range` or as one stream, and hand each group to
+3. On the next mount, `GET` and parse the header and the entry table, compute offsets from the source
+   blob.meta, skip cached groups, fetch the rest by `Range` or as one stream, and hand each group to
    `fill_chunk_group_from_redirect`. `NotFound` or a short read falls back to on-demand reads.
