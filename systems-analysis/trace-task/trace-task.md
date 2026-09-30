@@ -8,16 +8,6 @@ dfdaemon fetches the bytes it does not have locally, assembles them in access or
 local file, and serves it back on the next mount as one HTTP stream with `Range` support.
 A cold start that used to issue hundreds or thousands of small range requests issues one.
 
-## Motivation
-
-- **Performance**: Every on-demand chunk group read is one range `GET` through the proxy, which costs a
-  task session on dfdaemon (two metadata writes and a scheduler round trip). Replaying a recorded trace as
-  one stream removes that per-request overhead from the container cold-start path.
-- **Simplicity**: Two HTTP endpoints and one new metadata table. No changes to `dragonfly-api`,
-  no new configuration, no scheduler involvement.
-- **Locality**: A trace task is built and served by the dfdaemon that received the upload.
-  Replication is handled on the client side by `dragonfly-sdk`, so dfdaemon stays stateless about replicas.
-
 ## Goals
 
 1. Add `TraceTask`, a local task built from the chunk groups accessed by a nydusd instance and served over HTTP with `Range`.
@@ -54,7 +44,7 @@ dragonfly-client-metric/src
 |-lib.rs                      // trace task metrics
 
 dragonfly-sdk/client-request
-|-rust/src/id_generator.rs    // trace_task_id
+|-rust/src/id_generator.rs    // trace_task_id, nydusd_id
 |-rust/src/lib.rs             // put_trace_task, get_trace_task, decode_trace_task_entries
 |-go/...                      // Go parity and consistency vectors
 ```
@@ -64,8 +54,15 @@ dragonfly-sdk/client-request
 ### API
 
 nydusd sends requests directly to the dfdaemon proxy port (default `4001`).
-Both endpoints require the `X-Dragonfly-Nydusd-ID` header (`^[A-Za-z0-9_.-]{1,128}$`), which identifies the
-nydusd instance and is used only for tracing spans and logs.
+Both endpoints require the `X-Dragonfly-Nydusd-ID` header, used only for tracing spans and logs.
+The SDK generates it once per nydusd process the same way `IDGenerator::peer_id` is generated:
+
+```rust
+/// Generates the nydusd id.
+pub fn nydusd_id(&self) -> String {
+    format!("{}-{}-{}", self.ip, self.hostname, Uuid::new_v4())
+}
+```
 
 #### ID
 
@@ -87,7 +84,7 @@ it only validates that the path segment matches `^[0-9a-f]{64}$`.
 ```http
 PUT /v1/trace-tasks/3f0c…e9a1 HTTP/1.1
 Content-Type: application/json
-X-Dragonfly-Nydusd-ID: 7c1e…9f2b
+X-Dragonfly-Nydusd-ID: 10.0.0.8-node-1-7c1e…9f2b
 
 {"chunk_groups":[
   {"blob_index":1,"chunk_group_index":0,
@@ -135,7 +132,7 @@ A later `PUT` for the same id with different chunk groups is ignored; the first 
 
 ```http
 GET /v1/trace-tasks/3f0c…e9a1 HTTP/1.1
-X-Dragonfly-Nydusd-ID: 7c1e…9f2b
+X-Dragonfly-Nydusd-ID: 10.0.0.8-node-1-7c1e…9f2b
 Range: bytes=0-87
 
 HTTP/1.1 206 Partial Content
@@ -398,8 +395,8 @@ pub fn decode_trace_task_entries(bytes: &[u8]) -> Result<Vec<TraceTaskEntry>>;
 
 Replicas are chosen with `VNodeHashRing::get_with_replicas(&id, 2)`, so `PUT` and `GET` for one id land on
 the same two endpoints. All `Range` reads of one replay go to the same replica. The Go module implements
-`TraceTaskID`, `PutTraceTask`, `GetTraceTask` and `DecodeTraceTaskEntries` with shared consistency vectors
-for the id and the codec.
+`TraceTaskID`, `NydusdID`, `PutTraceTask`, `GetTraceTask` and `DecodeTraceTaskEntries` with shared
+consistency vectors for the id and the codec.
 
 ### Nydus
 
