@@ -45,7 +45,7 @@ dragonfly-client-metric/src
 
 dragonfly-sdk/client-request
 |-rust/src/id_generator.rs    // trace_task_id, nydusd_id
-|-rust/src/lib.rs             // put_trace_task, get_trace_task, decode_trace_task_entries
+|-rust/src/lib.rs             // put_trace_task, get_trace_task
 |-go/...                      // Go parity, consistency vectors
 ```
 
@@ -356,19 +356,18 @@ pub struct GetTraceTaskRequest { pub id: String, pub nydusd_id: String, pub rang
 pub async fn put_trace_task(&self, request: PutTraceTaskRequest) -> Result<()>;
 
 /// GET from the replicas in ring order; next replica on 404; Err(NotFound) when every replica returns 404.
+/// Returns the raw stream; the caller parses the header and the entry table.
 pub async fn get_trace_task(&self, request: GetTraceTaskRequest) -> Result<GetResponse>;
-
-pub fn decode_trace_task_entries(bytes: &[u8]) -> Result<Vec<TraceTaskEntry>>;
 ```
 
 All `Range` reads of one replay go to the same replica. The Go module implements `TraceTaskID`, `NydusdID`,
-`PutTraceTask`, `GetTraceTask` and `DecodeTraceTaskEntries` with shared consistency vectors.
+`PutTraceTask` and `GetTraceTask` with shared consistency vectors for the ids.
 
 ### Nydus
 
 1. After mount, record chunk groups read on demand in first-access order, grouped by blob with its `url`,
    request `header` and `compressor`.
 2. `put_trace_task` once, after 10 s without an on-demand read or 5 min after mount, whichever comes first.
-3. On the next mount, `GET` the header and the entry table, compute offsets from the source blob.meta, skip
+3. On the next mount, `GET` and parse the header and the entry table, compute offsets from the source blob.meta, skip
    cached groups, fetch the rest by `Range` or as one stream, and hand each group to
    `fill_chunk_group_from_redirect`. `NotFound` or a short read falls back to on-demand reads.
