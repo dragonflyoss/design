@@ -355,8 +355,8 @@ pub struct GetTraceTaskRequest { pub id: String, pub nydusd_id: String, pub rang
 /// PUT to two replicas from the hash ring; Ok when any returns 200 or 202.
 pub async fn put_trace_task(&self, request: PutTraceTaskRequest) -> Result<()>;
 
-/// GET from the replicas in ring order; next replica on 404; None when all miss.
-pub async fn get_trace_task(&self, request: GetTraceTaskRequest) -> Result<Option<GetResponse>>;
+/// GET from the replicas in ring order; next replica on 404; Err(NotFound) when every replica returns 404.
+pub async fn get_trace_task(&self, request: GetTraceTaskRequest) -> Result<GetResponse>;
 
 pub fn decode_trace_task_entries(bytes: &[u8]) -> Result<Vec<TraceTaskEntry>>;
 ```
@@ -371,4 +371,4 @@ All `Range` reads of one replay go to the same replica. The Go module implements
 2. `put_trace_task` once, after 10 s without an on-demand read or 5 min after mount, whichever comes first.
 3. On the next mount, `GET` the header and the entry table, compute offsets from the source blob.meta, skip
    cached groups, fetch the rest by `Range` or as one stream, and hand each group to
-   `fill_chunk_group_from_redirect`. `404` or a short read falls back to on-demand reads.
+   `fill_chunk_group_from_redirect`. `NotFound` or a short read falls back to on-demand reads.
