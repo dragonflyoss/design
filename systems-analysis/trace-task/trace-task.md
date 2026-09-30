@@ -296,9 +296,7 @@ deleted at startup, so no timeout is needed.
    | `url`            | the blob's `url`                                            |
    | `range`          | `Range { start: compressed_offset, length: compressed_size }` |
    | `request_header` | the blob's `header` without `Host` and `Range`              |
-   | `rule`           | matching proxy rule, otherwise `Rule::default()`            |
    | `prefetch`       | `false`                                                     |
-   | `priority`       | from the `PUT` headers                                      |
 
    The task id matches the task written when nydusd read the range through the proxy, so local pieces are
    found without a scheduler round trip.
