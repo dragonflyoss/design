@@ -4,9 +4,10 @@
 
 This design document proposes a new task type for the Dragonfly client called TraceTask.
 nydusd records the chunk groups it reads on demand during one run and uploads the list to dfdaemon.
-dfdaemon fetches the bytes it does not have locally, assembles them in access order into a single
-local file, and serves it back on the next mount as one HTTP stream with `Range` support.
-A cold start that used to issue hundreds or thousands of small range requests issues one.
+dfdaemon fetches the bytes it does not have locally, decompresses each chunk group and assembles them in
+access order into one local file. On the next mount nydusd downloads that file as one HTTP stream with
+`Range` support and fills its blob cache from it. A cold start that used to issue hundreds or thousands of
+small range requests issues one.
 
 ## Goals
 
@@ -16,6 +17,12 @@ A cold start that used to issue hundreds or thousands of small range requests is
 4. Provide client-side replication (two replicas, read fallback) in `dragonfly-sdk` for Rust and Go.
 
 ## Architecture
+
+![Trace Task Overview](./overview.png)
+
+The first mount records and builds; the next mount replays. dfdaemon keeps the trace task as a plain file next
+to the tasks it was built from and never announces it to the scheduler. Replication is the SDK's job: it uploads
+to two dfdaemons chosen by hash ring and falls back between them on `404`.
 
 ![Trace Task Workflow](./sequence-diagram.png)
 
@@ -86,36 +93,65 @@ PUT /v1/trace-tasks/3f0c…e9a1 HTTP/1.1
 Content-Type: application/json
 X-Dragonfly-Nydusd-ID: 10.0.0.8-node-1-7c1e…9f2b
 
-{"chunk_groups":[
-  {"blob_index":1,"chunk_group_index":0,
+{"blobs":[
+  {"source_blob_index":1,
    "url":"https://registry.example.com/v2/app/blobs/sha256:aaaa…",
-   "range":{"start":0,"length":1048576}},
-  {"blob_index":1,"chunk_group_index":5,
-   "url":"https://registry.example.com/v2/app/blobs/sha256:aaaa…",
-   "range":{"start":5242880,"length":262144}},
-  {"blob_index":2,"chunk_group_index":0,
+   "header":{"Authorization":"Bearer …"},
+   "compressor":"zstd",
+   "chunk_groups":[
+     {"source_chunk_group_index":0,
+      "compressed_offset":0,"compressed_size":1048576,
+      "uncompressed_size":2097152,"is_uncompressed":false},
+     {"source_chunk_group_index":5,
+      "compressed_offset":5242880,"compressed_size":262144,
+      "uncompressed_size":524288,"is_uncompressed":false}
+   ]},
+  {"source_blob_index":2,
    "url":"https://registry.example.com/v2/app/blobs/sha256:bbbb…",
-   "range":{"start":0,"length":65536}}
+   "header":{"Authorization":"Bearer …"},
+   "compressor":"zstd",
+   "chunk_groups":[
+     {"source_chunk_group_index":0,
+      "compressed_offset":0,"compressed_size":131072,
+      "uncompressed_size":131072,"is_uncompressed":true}
+   ]}
 ]}
 ```
 
 ```rust
 pub struct UploadTraceTaskRequest {
+    pub blobs: Vec<UploadTraceTaskBlob>,
+}
+
+pub struct UploadTraceTaskBlob {
+    pub source_blob_index: u16,
+    pub url: String,
+    pub header: HashMap<String, String>,
+    pub compressor: TraceTaskCompressor,
     pub chunk_groups: Vec<UploadTraceTaskChunkGroup>,
 }
 
 pub struct UploadTraceTaskChunkGroup {
-    pub blob_index: u32,
-    pub chunk_group_index: u32,
-    pub url: String,
-    pub range: Range,
+    pub source_chunk_group_index: u32,
+    pub compressed_offset: u64,
+    pub compressed_size: u32,
+    pub uncompressed_size: u32,
+    pub is_uncompressed: bool,
 }
+
+/// The chunk group compressor, the same set and codes as nydus `BlobMetadataCompressor`.
+pub enum TraceTaskCompressor { None, Zstd, Lz4Block }   // "none" | "zstd" | "lz4"
 ```
 
-Each item is one nydus chunk group. `blob_index` and `chunk_group_index` are the same pair nydus records
-in its own `/trace` document and are copied into the entry table for replay. `url` and `range` locate the
-compressed bytes of the group in the source blob; dfdaemon uses them only to download what is missing locally
-and does not persist them.
+Each blob object is one source blob: `url` and `header` are the request dfdaemon uses to download it,
+`compressor` is the blob's chunk group compressor, and `chunk_groups` lists the groups read from it.
+Every chunk group field is the same-named accessor of nydus `BlobMetadataChunkGroupExtent`:
+`compressed_offset` and `compressed_size` locate the group's bytes in the blob, `is_uncompressed` says the
+group is stored plain (nydus skips compression that would not shrink a group), and `uncompressed_size` is
+required because an LZ4 block carries no frame header. `source_blob_index` and `source_chunk_group_index` are
+copied into the entry table in body order, blob by blob. dfdaemon decodes a compressed group (one zstd frame
+or one LZ4 block) or copies a plain one, checks the length, and stores the decoded bytes. It does not verify
+the CRC32C: nydus verifies every group against the source blob.meta when it fills the cache.
 
 The upload is idempotent on `id`: the same id is built once, and a repeated `PUT` returns the current state.
 A later `PUT` for the same id with different chunk groups is ignored; the first upload wins until the task is evicted.
@@ -124,8 +160,8 @@ A later `PUT` for the same id with different chunk groups is ignored; the first 
 | ------ | ------------------------------------------------------------------------------------------------------------- |
 | 202    | Created, or already building                                                                                  |
 | 200    | Already finished                                                                                              |
-| 400    | Invalid id or `X-Dragonfly-Nydusd-ID`; empty `chunk_groups`; url scheme not http/https; `range.length == 0`; malformed JSON |
-| 413    | Body larger than 4 MiB or more than 8192 chunk groups                                                         |
+| 400    | Invalid id or `X-Dragonfly-Nydusd-ID`; empty `blobs` or `chunk_groups`; url scheme not http/https; `compressed_size == 0`; `uncompressed_size == 0`; `is_uncompressed` with `compressed_size != uncompressed_size`; unknown `compressor`; malformed JSON |
+| 413    | Body larger than 4 MiB or more than 8192 chunk groups in total                                                |
 | 507    | `has_enough_space(content_length)` is false                                                                   |
 
 #### GET /v1/trace-tasks/{id}
@@ -133,13 +169,13 @@ A later `PUT` for the same id with different chunk groups is ignored; the first 
 ```http
 GET /v1/trace-tasks/3f0c…e9a1 HTTP/1.1
 X-Dragonfly-Nydusd-ID: 10.0.0.8-node-1-7c1e…9f2b
-Range: bytes=0-87
+Range: bytes=0-39
 
 HTTP/1.1 206 Partial Content
 Content-Type: application/octet-stream
 Accept-Ranges: bytes
-Content-Range: bytes 0-87/1376344
-Content-Length: 88
+Content-Range: bytes 0-39/2752552
+Content-Length: 40
 X-Dragonfly-Server-IP: 10.0.0.12
 ```
 
@@ -157,21 +193,23 @@ A read failure in the middle of the stream closes the connection; there is no pa
 ### Content Format
 
 The file follows the nydus blob metadata style: a fixed-size header, a fixed-size entry table, then raw data.
-All integers are little-endian. The entry table is placed before the data, because it is fully known at
-upload time and a reader can consume the stream in one pass.
+All integers are little-endian. The data region holds the decompressed bytes of every chunk group, back to back
+in table order. An entry names only the source group; its length is the `uncompressed_size` in the source
+blob.meta and its offset is the sum of the lengths before it, so the table carries neither.
 
 ![Trace Task Content Format](./content-format.png)
 
-For the three chunk groups above: `data_offset` is 88, the entry offsets are 0, 1048576 and 1310720,
-and `content_length` is 1376344. A `Range: bytes=0-87` request returns the header and the entry table.
+For the three chunk groups above: `data_offset` is 40, the entries start at 0, 2097152 and 2621440 in the
+data region, and `content_length` is 2752552. A `Range: bytes=0-39` request returns the header and the entry table.
 
-The file is a pure function of `chunk_groups`, so the two replicas are byte-identical. Entries carry no
-digest: the source pieces were verified when they entered the local storage, and nydus verifies every
-chunk group with CRC32C when it decodes it.
+The file is a pure function of the request body, so the two replicas are byte-identical. At replay nydus
+verifies and places each group with the source blob's own blob.meta (`uncompressed_size`,
+`uncompressed_crc32`, chunk lengths, `logical_block_offset`), which it loads at mount for on-demand reads
+anyway; nothing is decompressed on the replay path.
 
 ```rust
 pub const TRACE_TASK_HEADER_SIZE: usize = 16;
-pub const TRACE_TASK_ENTRY_SIZE: usize = 24;
+pub const TRACE_TASK_ENTRY_SIZE: usize = 8;
 
 pub struct TraceTaskHeader {
     pub entry_count: u32,
@@ -180,10 +218,9 @@ pub struct TraceTaskHeader {
 }
 
 pub struct TraceTaskEntry {
-    pub blob_index: u32,
-    pub chunk_group_index: u32,
-    pub offset: u64,
-    pub length: u64,
+    pub source_chunk_group_index: u32,
+    pub source_blob_index: u16,
+    pub reserved: u16,
 }
 ```
 
@@ -282,7 +319,7 @@ async fn build(id, chunk_groups, dynconfig, remote_ip);
 
 #### Upload
 
-1. Validate the request, encode the header and the entry table, compute `content_length`.
+1. Validate the request, encode the header and the entry table, `content_length = data_offset + Σ uncompressed_size`.
 2. Take the `create` lock and `get_trace_task(id)`: finished returns `Exists`; building returns `Accepted`
    without a second build.
 3. `has_enough_space(content_length)`, `create_trace_task_started`, release the lock.
@@ -296,29 +333,33 @@ proxy accepts requests, so no timeout is needed and two builds never write the s
 
 #### Build
 
+![Trace Task Build](./build-flow.png)
+
 1. `write_trace_task(id, 0, data_offset, header || entry table)`.
 2. Build one `DownloadTaskRequest` per chunk group with the same fields as a proxied `GET`:
 
-   | Field            | Value                                                   |
-   | ---------------- | ------------------------------------------------------- |
-   | `range`          | `Some(range)`                                           |
-   | `request_header` | empty                                                   |
-   | `rule`           | `find_matching_rule` match, otherwise `Rule::default()` |
-   | `prefetch`       | `false`                                                 |
-   | `priority`       | `header::get_priority` on the `PUT` headers             |
+   | Field            | Value                                                       |
+   | ---------------- | ----------------------------------------------------------- |
+   | `url`            | the blob's `url`                                            |
+   | `range`          | `Range { start: compressed_offset, length: compressed_size }` |
+   | `request_header` | the blob's `header` without `Host` and `Range`              |
+   | `rule`           | `find_matching_rule` match, otherwise `Rule::default()`     |
+   | `prefetch`       | `false`                                                     |
+   | `priority`       | `header::get_priority` on the `PUT` headers                 |
 
    The task id is derived by `task::download` with the existing rules, so it matches the task that was
    written when nydusd read the range through the proxy, and local pieces are found without a scheduler
-   round trip. Because `request_header` is empty, a chunk group that is not local and whose origin requires
-   credentials fails the build.
+   round trip.
 3. `stream::iter(requests).map(task::download).buffered(concurrent_piece_count)`: up to
    `download.concurrent_piece_count` sessions are opened concurrently while the output stays in order.
    `Task::download` serves finished local pieces first and fetches the rest from peers or the origin.
 4. Consume each session with `write_pieces_in_order(task, out_stream, started, task_id, sink)`, extracted
-   from the ordered piece loop in `proxy_via_dfdaemon`. The sink is
-   `write_trace_task(id, data_offset + offset, len, reader)`.
-5. Verify that every chunk group wrote exactly `range.length` bytes. Any failure calls
-   `create_trace_task_failed`, which deletes the row and the file; success calls `create_trace_task_finished`.
+   from the ordered piece loop in `proxy_via_dfdaemon`. The sink collects the group's compressed bytes.
+5. Unless `is_uncompressed`, decode the group with the blob's `compressor` (`zstd::decode_all`, or
+   `lz4_flex::block::decompress` with `uncompressed_size`); the result must be `uncompressed_size` bytes or
+   the offsets that follow are wrong. `write_trace_task(id, data_offset + Σ previous uncompressed_size,
+   uncompressed_size, bytes)`. No checksum is computed; nydus verifies at replay. Any failure
+   calls `create_trace_task_failed`, which deletes the row and the file; success calls `create_trace_task_finished`.
 
 #### Download
 
@@ -345,6 +386,8 @@ const MAX_BODY_LENGTH: usize = 4 * 1024 * 1024;
 ```
 
 The body is read through `http_body_util::Limited` so oversized uploads are rejected before parsing.
+Decoding uses the `zstd` and `lz4_flex` crates, the same ones `nydus-storage` encodes with; `zstd-sys` is
+already linked through `librocksdb-sys`.
 `X-Dragonfly-Nydusd-ID` is added to `proxy/header.rs` next to the other `X-Dragonfly-*` headers and is
 recorded as a span field; it is not a metrics label.
 
@@ -370,7 +413,7 @@ recorded as a span field; it is not a metrics label.
 pub struct PutTraceTaskRequest {
     pub id: String,
     pub nydusd_id: String,
-    pub chunk_groups: Vec<UploadTraceTaskChunkGroup>,
+    pub blobs: Vec<UploadTraceTaskBlob>,
 }
 
 pub struct GetTraceTaskRequest {
@@ -400,11 +443,12 @@ consistency vectors for the id and the codec.
 
 ### Nydus
 
-1. After mount, record `(blob_index, chunk_group_index, url, range)` for every chunk group read on demand,
-   in first-access order.
+1. After mount, record every chunk group read on demand in first-access order, grouped by source blob with
+   the blob's `url`, request `header` and `compressor`.
 2. Call `put_trace_task` once, when no on-demand read has happened for 10 seconds or when 5 minutes have
    elapsed since mount, whichever comes first.
-3. On the next mount, `GET` the header and the entry table. Skip the groups already present in the blob
-   cache, fetch the rest with as few `Range` requests as possible or stream the whole file, decode and
-   CRC32C-verify each group, write it into the source blob cache and mark it ready. A `404` or a short read
-   falls back to on-demand reads.
+3. On the next mount, `GET` the header and the entry table, and compute each entry's offset and length from
+   the source blob.meta. Skip the groups already present in the blob cache, fetch the rest with as few `Range`
+   requests as possible or stream the whole file. Hand each group to `fill_chunk_group_from_redirect`, which
+   verifies it (size, CRC32C, digest) against the source blob.meta, writes it into the source blob cache and
+   marks it ready; the bytes are already decoded. A `404` or a short read falls back to on-demand reads.
