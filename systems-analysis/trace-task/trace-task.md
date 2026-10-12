@@ -73,8 +73,8 @@ pub fn trace_task_id(&self, bootstrap_digest: &str) -> String {
 
 #### PUT /v1/trace-tasks/{id}
 
-The body is the nydus trace document (`GET /trace` of the nydusd apiserver, `{"version":1,"patterns":[...]}`)
-plus a `blobs` array telling dfdaemon where to fetch each referenced blob.
+The body carries the entries of the nydus trace document (`GET /trace` of the nydusd apiserver) as
+`chunk_groups`, plus a `blobs` array telling dfdaemon where to fetch each referenced blob.
 
 ```http
 PUT /v1/trace-tasks/3f0c…e9a1 HTTP/1.1
@@ -90,7 +90,7 @@ X-Dragonfly-Nydusd-ID: 10.0.0.8-node-1-7c1e…9f2b
     "url":"https://registry.example.com/v2/app/blobs/sha256:bbbb…",
     "header":{"Authorization":"Bearer …"}}
  ],
- "patterns":[
+ "chunk_groups":[
    {"blob_index":1,"chunk_group_index":0},
    {"blob_index":1,"chunk_group_index":5},
    {"blob_index":2,"chunk_group_index":0}
@@ -101,7 +101,7 @@ X-Dragonfly-Nydusd-ID: 10.0.0.8-node-1-7c1e…9f2b
 pub struct UploadTraceTaskRequest {
     pub version: u32,                           // TRACE_DOCUMENT_VERSION, 1
     pub blobs: Vec<UploadTraceTaskBlob>,
-    pub patterns: Vec<UploadTraceTaskPattern>,  // same JSON shape as nydus TraceEntry
+    pub chunk_groups: Vec<UploadTraceTaskChunkGroup>,  // nydus TraceEntry, same fields
 }
 
 pub struct UploadTraceTaskBlob {
@@ -110,7 +110,7 @@ pub struct UploadTraceTaskBlob {
     pub header: HashMap<String, String>,
 }
 
-pub struct UploadTraceTaskPattern {
+pub struct UploadTraceTaskChunkGroup {
     pub blob_index: u16,
     pub chunk_group_index: u32,
 }
@@ -122,7 +122,7 @@ pub struct UploadTraceTaskPattern {
 | `blob_index`        | The blob's device slot in the bootstrap, non-zero; becomes `source_blob_index` in the redirect table |
 | `url`               | The blob URL dfdaemon downloads from                                                           |
 | `header`            | The request headers for that download                                                          |
-| `patterns`          | The chunk groups in first-access order, deduplicated by nydusd                                 |
+| `chunk_groups`      | The chunk groups in first-access order; repeats are dropped, first occurrence wins             |
 | `chunk_group_index` | The group's index in the blob's ChunkGroupTable; becomes `source_chunk_group_index`             |
 
 The upload is idempotent on `id`: the first upload wins until the task is evicted, a repeated `PUT` returns the
@@ -132,8 +132,8 @@ current state.
 | ------ | ------------------------------------------------------------------------------------------------------------- |
 | 202    | Created or building                                                                                           |
 | 200    | Finished                                                                                                      |
-| 400    | Invalid id or `X-Dragonfly-Nydusd-ID`; `version != 1`; empty `blobs` or `patterns`; `blob_index` zero, duplicated in `blobs`, or named by a pattern but missing from `blobs`; url scheme not http/https; malformed JSON |
-| 413    | Body larger than 4 MiB or more than 8192 patterns                                                             |
+| 400    | Invalid id or `X-Dragonfly-Nydusd-ID`; `version != 1`; empty `blobs` or `chunk_groups`; `blob_index` zero, duplicated in `blobs`, or named by a chunk group but missing from `blobs`; url scheme not http/https; malformed JSON |
+| 413    | Body larger than 4 MiB or more than 8192 chunk groups                                                           |
 
 Checks that need the source blob metas, a `chunk_group_index` out of range, mixed compressors, a source that is
 itself a redirect blob, and the disk space check happen in the build and delete the task on failure, see
@@ -177,7 +177,7 @@ has, so neither side gains a codec.
 ```text
 +------------------------------------------+ 0
 | chunk groups                             |  the traced source groups, encoded bytes copied
-|                                          |  verbatim, in pattern order
+|                                          |  verbatim, in access order
 +------------------------------------------+ compressed_data_size, zero padded to 4 KiB
 | blob meta                                |  NDBLMETA: header, ChunkGroupTable, ChunkLengthTable,
 |                                          |  ChunkGroupIndexTable, ChunkGroupDigestTable (optional),
@@ -195,11 +195,11 @@ compressor. Nothing is decoded or recompressed. Constraints inherited from `nydu
 share one compressor (plain-stored groups fit under any), a source that is itself a redirect blob is refused,
 `blob_index` is a non-zero `u16`.
 
-The file is a pure function of the patterns and the source blob metas, so replicas are byte-identical.
+The file is a pure function of the chunk group list and the source blob metas, so replicas are byte-identical.
 dfdaemon computes no checksum; nydusd validates CRC32C and digest against the source meta when it fills the
 cache.
 
-The assembly, source metas plus patterns to a redirect `BlobMetadata`, is the second half of
+The assembly, source metas plus the chunk group list to a redirect `BlobMetadata`, is the second half of
 `build_ondemand_blob` in `nydus/src/optimize/mod.rs`, a binary crate. Move it into `nydus-format` as
 `BlobMetadata::new_redirect` so dfdaemon and `nydus optimize` share one writer; until then dfdaemon carries a copy.
 
@@ -300,24 +300,26 @@ a crash are deleted when dfdaemon starts, so no timeout is needed.
 ![Trace Task Build](./build-flow.png)
 
 1. For each blob in `blobs`, read the footer (the last 4 KiB) and the blob meta region it points at, through the
-   same download path as a proxied `GET`:
+   same download path as a proxied `GET`, the request built from `header` like `make_download_task_request`:
 
    | Field            | Value                                                       |
    | ---------------- | ----------------------------------------------------------- |
    | `url`            | the blob's `url`                                            |
-   | `range`          | `Range { start, length }` of the footer, then of the blob meta |
-   | `request_header` | the blob's `header` without `Host` and `Range`              |
+   | `range`          | `None` for the footer, `Range { start, length }` from the footer for the blob meta |
+   | `request_header` | the blob's `header` without `Host`, plus `Range: bytes=-4096` for the footer |
    | `prefetch`       | `false`                                                     |
 
-   The task id matches the task nydusd created when it read the blob through the proxy, so the blob size comes
-   from the local task metadata and both reads hit local pieces. Parse with `BlobFooter::from_bytes` and
-   `BlobMetadata::from_bytes`.
+   The footer needs no blob size: the download path resolves the `Range` header against the content length of
+   its own `HEAD`, as it does for nydusd. `header` is what nydusd sends through the proxy, so tag, application
+   and piece length, and with them the task id, match the task its reads created and both reads hit local
+   pieces. Parse with `BlobFooter::from_bytes` and `BlobMetadata::from_bytes`.
 2. Validate against the metas: every `chunk_group_index` is below the blob's `chunk_group_count`, no source
    `is_redirect`, compressed sources share one compressor.
-3. Assemble the redirect `BlobMetadata` from the source metas in pattern order.
+3. Assemble the redirect `BlobMetadata` from the source metas in access order.
    `content_length = align_up(Σ compressed_size, 4096) + blob_metadata.size() + 4096`.
    `has_enough_space`, then `create_trace_task(id, content_length)`.
-4. One download request per pattern, the fields of step 1 with `range` = the source group's `compressed_range()`.
+4. One download request per chunk group, the fields of step 1 with `range` = the source group's
+   `compressed_range()` and no `Range` header.
    `stream::iter(requests).map(download).buffered(concurrent_piece_count)`; output stays in order.
 5. Consume each session with `write_pieces_in_order`, shared with the proxy, and write the bytes unchanged at
    `Σ previous compressed_size`. No decode, no checksum; nydusd validates at fill.
@@ -342,7 +344,7 @@ if request.uri().host().is_none() && request.uri().path().starts_with(PATH_PREFI
 
 // proxy/trace_task.rs
 pub const PATH_PREFIX: &str = "/v1/trace-tasks/";
-const MAX_PATTERNS: usize = 8192;
+const MAX_CHUNK_GROUPS: usize = 8192;
 const MAX_BODY_LENGTH: usize = 4 * 1024 * 1024;
 ```
 
@@ -372,7 +374,7 @@ pub struct PutTraceTaskRequest {
     pub id: String,
     pub nydusd_id: String,
     pub blobs: Vec<UploadTraceTaskBlob>,
-    pub patterns: Vec<UploadTraceTaskPattern>,
+    pub chunk_groups: Vec<UploadTraceTaskChunkGroup>,
 }
 pub struct GetTraceTaskRequest { pub id: String, pub nydusd_id: String, pub range: Option<Range> }
 
@@ -390,8 +392,8 @@ All `Range` reads of one replay go to the same replica. The Go module implements
 ### Nydus
 
 1. After mount the existing `TraceRecorder` records on-demand chunk group accesses in first-access order.
-   `put_trace_task` sends its snapshot (`version`, `patterns`) plus the `url` and request `header` of each
-   referenced blob, both known to the registry backend.
+   `put_trace_task` sends the snapshot entries as `chunk_groups` with its `version`, plus the `url` and
+   request `header` of each referenced blob, both known to the registry backend.
 2. `put_trace_task` once, after 10 s without an on-demand read or 5 min after mount, whichever comes first.
 3. On the next mount, before the image's own prefetch, open the trace task as a redirect blob through a
    `BlobBackend` over `get_trace_task`: `blob_metadata` reads the footer with `Range: bytes=-4096`, takes the
